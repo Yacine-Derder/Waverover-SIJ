@@ -10,7 +10,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 from waverover.stack_config import load_stack_config, required
 
 
-STACK_DEFAULTS = load_stack_config()
+STACK_DEFAULTS = load_stack_config(require_identity=False)
 
 
 def _current_terminal_device():
@@ -26,7 +26,6 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'robot_name',
-            default_value=str(required(STACK_DEFAULTS, 'robot_name')),
             description='Initial robot ID used by the terminal waypoint UI',
         ),
         DeclareLaunchArgument(

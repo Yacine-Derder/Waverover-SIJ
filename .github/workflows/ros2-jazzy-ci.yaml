@@ -1,0 +1,40 @@
+name: ROS 2 Jazzy CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: jazzy
+      - name: Install declared dependencies
+        run: |
+          sudo rosdep init || true
+          rosdep update
+          # ament_python comes from the selected ROS distribution but is not
+          # represented by a Noble rosdep key.
+          rosdep install --from-paths . --ignore-src --rosdistro jazzy -r -y \
+            --skip-keys ament_python
+      - name: Build
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          colcon build --symlink-install --event-handlers console_direct+
+      - name: Test
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          source install/setup.bash
+          # The vendored LDROBOT driver registers only an upstream lint suite
+          # with a large pre-existing baseline; it is still built above.
+          colcon test --packages-skip ldlidar_stl_ros2 \
+            --event-handlers console_direct+
+          colcon test-result --verbose
+      - name: Test isolated updater transactions
+        run: python3 -m pytest -q deployment/test

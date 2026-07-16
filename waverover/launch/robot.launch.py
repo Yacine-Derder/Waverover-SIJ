@@ -21,7 +21,7 @@ from waverover.stack_config import (
 )
 
 
-STACK_DEFAULTS = load_stack_config()
+STACK_DEFAULTS = load_stack_config(require_identity=False)
 
 
 def selected_onboard_components(pose_source, control_mode='fixed_wing'):
@@ -135,6 +135,7 @@ def _launch_onboard_stack(context):
 
 
 def generate_launch_description():
+    onboard_config = load_stack_config(require_identity=True)
     communication = required(STACK_DEFAULTS, 'communication')
     bridge = required(STACK_DEFAULTS, 'bridge')
     lidar = required(STACK_DEFAULTS, 'lidar')
@@ -145,7 +146,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'robot_name',
-            default_value=str(required(STACK_DEFAULTS, 'robot_name')),
+            default_value=str(required(onboard_config, 'robot_name')),
             description='Robot ID used to derive namespaces/topics/frames',
         ),
         DeclareLaunchArgument(

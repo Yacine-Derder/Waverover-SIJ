@@ -1,95 +1,45 @@
 # WaveRover onboard stack
 
-All deployment defaults live in `config/robot_defaults.yaml`. The unified
-launch reads this file and selects either the SLAM pipeline or the external
-motion-capture pose path:
+Shared deployment settings live in `config/robot_defaults.yaml`. Machine
+identity is deliberately separate: copy `config/robot_identity.example.yaml`
+to the ignored `config/robot_identity.yaml` and set only `robot_name`. The
+onboard stack fails clearly if this file is absent or invalid. It can also be
+selected explicitly with `WAVEROVER_IDENTITY_FILE`.
 
 ```bash
 ros2 launch waverover robot.launch.py
 ```
 
-The waypoint terminal remains a separate operator-laptop application and is
-not started by this command.
+The default shared mode is `control_mode=fixed_wing` and `pose_source=MCS`.
+MCS starts the UART bridge and waypoint controller and consumes
+`/macortex_bridge/waverover_<ID>/pose` in the global `robotics_lab` frame.
+SLAM starts LiDAR, static TF, RF2O, SLAM Toolbox, the bridge, controller, and
+optional Foxglove. Its frames include `waverover_<ID>/map`,
+`waverover_<ID>/odom`, and `waverover_<ID>/base_footprint`. `/tf` and
+`/tf_static` remain global topics while frame IDs prevent collisions.
 
-## Central configuration
-
-SLAM deployment:
-
-```yaml
-robot_name: "29"
-control_mode: fixed_wing
-pose_source: SLAM
-```
-
-MCS deployment:
-
-```yaml
-robot_name: "29"
-control_mode: fixed_wing
-pose_source: MCS
-```
-
-The same file defines the MCS topic pattern, frame, and timeout:
-
-```yaml
-mcs:
-  pose_topic_pattern: /macortex_bridge/{robot_namespace}/pose
-  frame: robotics_lab
-  pose_timeout_sec: 0.50
-```
-
-Changing only `robot_name` derives the namespace, robot topics, TF frame IDs,
-and MCS topic. Robot 30 therefore uses `/robot_30/...`, namespaced SLAM frames,
-and `/macortex_bridge/robot_30/pose`. `/tf`, `/tf_static`, and the external
-`/macortex_bridge/...` path remain global topics.
-
-SLAM mode starts LiDAR, the base-to-laser static transform, RF2O, SLAM
-Toolbox, the rover bridge, the waypoint controller, and optionally Foxglove.
-MCS mode starts only the rover bridge and waypoint controller. The external
-MCS bridge runs on the operator laptop and is intentionally never launched
-onboard.
-
-Launch arguments provide temporary overrides without editing the central
-file:
+Launch arguments may temporarily override identity and shared modes:
 
 ```bash
 ros2 launch waverover robot.launch.py \
-  robot_name:=30 control_mode:=twist pose_source:=MCS
+  robot_name:=30 control_mode:=twist pose_source:=SLAM
 ```
 
-Use `ros2 launch waverover robot.launch.py --show-args` for UART, sensor,
-Foxglove, controller-tuning, and MCS overrides. When `control_mode=manual_lr`,
-the unified launch omits the incompatible autonomous waypoint controller and
-keeps the bridge/manual command path available.
+When `control_mode=manual_lr`, the unified launch omits the autonomous
+controller. Robot-local keyboard wrappers use the machine identity by default
+and accept `--robot-name 30` overrides. The separate operator waypoint UI does
+not use a rover identity file and requires an explicit robot target.
 
-Rebuild after changing source configuration:
+The installed package contains `robot_defaults.yaml` and the identity example,
+never the ignored real identity. With `--symlink-install`, onboard identity
+discovery resolves the source-tree path; the systemd integration also exports
+the absolute path.
+
+Rebuild after source changes:
 
 ```bash
-cd ~/ros2_ws
-colcon build --packages-select waverover ros2waverover \
-  waverover_controller waverover_waypoint_ui --symlink-install
+cd /home/waverover/ros2_ws
+source /opt/ros/jazzy/setup.bash
+colcon build --symlink-install
 source install/setup.bash
 ```
-
-## Frames and Foxglove
-
-In SLAM mode, robot 29 publishes `/robot_29/map` and `/robot_29/scan`; choose
-`robot_29/map` as the Foxglove 3D fixed/display frame. MCS mode does not start
-map or scan producers, so those topics are intentionally absent. MCS waypoint
-coordinates use `robotics_lab`; the controller does not create a synthetic TF
-tree from the incoming pose.
-
-Foxglove is global. In a multi-robot SLAM composition, start one bridge and use
-`start_foxglove:=false` for additional onboard launches.
-
-## Keyboard and manual control
-
-The wrappers read their default robot from the central configuration:
-
-```bash
-ros2 run waverover waverover_teleop
-ros2 run waverover waverover_manual_lr
-```
-
-Use `--robot-name 30` for a temporary robot override. The manual L/R wrapper
-is intended for a bridge launched with `control_mode:=manual_lr`.

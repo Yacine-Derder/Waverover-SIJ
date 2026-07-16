@@ -10,6 +10,13 @@ from waverover.stack_config import load_stack_config
 from waverover_controller.waypoint_controller import ControllerConfig
 
 
+@pytest.fixture(autouse=True)
+def test_identity(tmp_path, monkeypatch):
+    identity = tmp_path / 'identity.yaml'
+    identity.write_text('robot_name: "test"\n', encoding='utf-8')
+    monkeypatch.setenv('WAVEROVER_IDENTITY_FILE', str(identity))
+
+
 def _load_waypoint_launch_module():
     launch_path = (
         Path(__file__).parents[1]
@@ -26,13 +33,13 @@ def _load_waypoint_launch_module():
 
 
 def test_controller_defaults_are_central_and_robot_derived():
-    stack_config = load_stack_config()
+    stack_config = load_stack_config(require_identity=False)
     config = ControllerConfig.from_stack_defaults(stack_config, '30')
 
     assert config.control_mode == 'fixed_wing'
-    assert config.pose_source == 'SLAM'
-    assert config.global_frame == 'robot_30/map'
-    assert config.robot_frame == 'robot_30/base_footprint'
+    assert config.pose_source == 'MCS'
+    assert config.global_frame == 'waverover_30/map'
+    assert config.robot_frame == 'waverover_30/base_footprint'
     assert config.cmd_vel_topic == 'cmd_vel'
     assert config.waypoint_topic == 'waypoints'
 
@@ -60,7 +67,7 @@ def test_mcs_launch_selection_uses_external_pose_and_lab_frame():
     assert parameters['pose_source'] == 'MCS'
     assert parameters['global_frame'] == 'robotics_lab'
     assert parameters['mcs_pose_topic'] == (
-        '/macortex_bridge/robot_29/pose'
+        '/macortex_bridge/waverover_29/pose'
     )
     assert parameters['mcs_pose_timeout_sec'] == pytest.approx(0.5)
 
@@ -82,8 +89,8 @@ def test_slam_launch_selection_keeps_namespaced_tf_frames():
     parameters = evaluate_parameters(context, node._Node__parameters)[0]
 
     assert parameters['pose_source'] == 'SLAM'
-    assert parameters['global_frame'] == 'robot_30/map'
-    assert parameters['robot_frame'] == 'robot_30/base_footprint'
+    assert parameters['global_frame'] == 'waverover_30/map'
+    assert parameters['robot_frame'] == 'waverover_30/base_footprint'
     assert parameters['mcs_pose_topic'] == (
-        '/macortex_bridge/robot_30/pose'
+        '/macortex_bridge/waverover_30/pose'
     )

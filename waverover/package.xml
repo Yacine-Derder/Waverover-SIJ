@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>waverover</name>
+  <version>0.0.0</version>
+  <description>Unified namespaced WaveRover SLAM/MCS onboard stack.</description>
+  <maintainer email="waverover@todo.todo">waverover</maintainer>
+  <license>TODO: License declaration</license>
+
+  <depend>launch</depend>
+  <depend>launch_ros</depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>foxglove_bridge</exec_depend>
+  <exec_depend>ros2waverover</exec_depend>
+  <exec_depend>ldlidar_stl_ros2</exec_depend>
+  <exec_depend>lifecycle_msgs</exec_depend>
+  <exec_depend>rf2o_laser_odometry</exec_depend>
+  <exec_depend>slam_toolbox</exec_depend>
+  <exec_depend>teleop_twist_keyboard</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

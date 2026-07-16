@@ -1,0 +1,6 @@
+waypoint_controller:
+  ros__parameters: {}
+    # Optional controller-only overrides belong here. Canonical robot and
+    # controller defaults live in waverover/config/robot_defaults.yaml.
+    # Example:
+    # goal_tolerance_m: 0.25

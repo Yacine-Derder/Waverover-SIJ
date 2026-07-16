@@ -1,0 +1,35 @@
+# ROS 2 generated directories
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Editors
+.vscode/
+.idea/
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# ROS bags and databases
+*.db3
+*.mcap
+
+# Maps and temporary data
+*.pgm
+*.posegraph
+
+# Operating systems
+Thumbs.db
+.DS_Store
+
+# Temporary files
+*.tmp
+*.swp
+*~

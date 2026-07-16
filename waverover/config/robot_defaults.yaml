@@ -1,0 +1,106 @@
+# Canonical deployment defaults for the complete WaveRover stack.
+#
+# Change robot_name for a new rover. Namespaces, robot topics, and TF frame
+# IDs are derived from it; do not embed a robot ID elsewhere in configuration.
+schema_version: 1
+robot_name: "29"
+control_mode: fixed_wing
+pose_source: MCS
+namespace_prefix: waverover_
+
+nodes:
+  bridge: bridge
+  lidar: STL19P
+  rf2o: rf2o_laser_odometry
+  slam: slam_toolbox
+  waypoint_controller: waypoint_controller
+  waypoint_ui: waypoint_ui
+
+# Robot-local names stay relative so the derived namespace applies. TF is
+# intentionally global while every frame ID is robot-specific.
+topics:
+  cmd_vel: cmd_vel
+  waypoints: waypoints
+  scan: scan
+  imu: imu/data_raw
+  odom: odom_rf2o
+  manual_lr: manual_lr
+  map: map
+  map_metadata: map_metadata
+  tf: /tf
+  tf_static: /tf_static
+
+frames:
+  map: map
+  odom: odom
+  base: base_footprint
+  lidar: laser
+
+# The operator-laptop bridge is external to this stack. Its topic embeds the
+# derived robot namespace so changing robot_name updates the subscription.
+mcs:
+  pose_topic_pattern: /macortex_bridge/{robot_namespace}/pose
+  frame: robotics_lab
+  pose_timeout_sec: 0.50
+  qos_depth: 10
+
+communication:
+  uart_address: /dev/ttyAMA0
+  baud_rate: 921600
+
+bridge:
+  enable_imu_stream: true
+  imu_rate_hz: 50
+  manual_lr_timeout_sec: 0.50
+
+lidar:
+  product_name: LDLiDAR_LD19
+  port: /dev/ttyUSB0
+  baud_rate: 230400
+  z: 0.10
+  yaw: -1.5708
+  scan_counterclockwise: true
+  enable_angle_crop: false
+  angle_crop_min: 0.0
+  angle_crop_max: 0.0
+  scan_points: 501
+
+rf2o:
+  frequency_hz: 20.0
+  publish_tf: true
+  init_pose_from_topic: ""
+
+slam:
+  use_sim_time: false
+  resolution: 0.05
+  max_laser_range: 16.0
+  minimum_travel_distance: 0.05
+  minimum_travel_heading: 0.05
+  transform_timeout: 0.2
+  tf_buffer_duration: 30.0
+  transform_publish_period: 0.1
+
+waypoint_controller:
+  control_rate_hz: 10.0
+  goal_tolerance_m: 0.15
+  heading_tolerance_deg: 15.0
+  forward_linear_x: 0.25
+  turn_angular_z: 0.40
+  final_loiter_direction: left
+  cmd_vel_qos_depth: 10
+  waypoint_qos_depth: 50
+
+manual_lr_ui:
+  publish_rate_hz: 10.0
+  step: 0.05
+  large_step: 0.10
+  min_speed: -0.5
+  max_speed: 0.5
+
+waypoint_ui:
+  publisher_qos_depth: 50
+  recent_send_limit: 20
+
+foxglove:
+  start: true
+  max_qos_depth: 300

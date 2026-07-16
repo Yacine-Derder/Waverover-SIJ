@@ -105,7 +105,14 @@ build_workspace() {
                 exit 1
             }
             # shellcheck disable=SC1090
+            set +u
             source "$ROS_SETUP_FILE"
+            setup_status=$?
+            set -u
+            if [[ $setup_status -ne 0 ]]; then
+                log "failed to source ROS setup: $ROS_SETUP_FILE"
+                exit 1
+            fi
         fi
         bash -c "$BUILD_COMMAND"
     )

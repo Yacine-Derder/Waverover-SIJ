@@ -8,11 +8,11 @@ rover, reads UART feedback, and publishes namespaced raw IMU data.
 ## Control modes
 
 The launch file reads defaults from
-`waverover/config/robot_defaults.yaml` and derives `/robot_<ID>` from
-`robot_name`. The
+`waverover/config/robot_defaults.yaml`, reads per-machine `robot_name` from
+the ignored identity file, and derives `/waverover_<ID>`. The
 bridge uses relative topic names, so robot 29 subscribes to
-`/robot_29/cmd_vel`, publishes `/robot_29/imu/data_raw`, and uses
-`/robot_29/manual_lr` in manual mode.
+`/waverover_29/cmd_vel`, publishes `/waverover_29/imu/data_raw`, and uses
+`/waverover_29/manual_lr` in manual mode.
 
 The default `control_mode` is `fixed_wing`. The same parameter name is used by
 the waypoint controller.
@@ -39,7 +39,7 @@ ros2 launch ros2waverover wave_rover_launch.py \
 
 Publish one manual command:
 ```
-ros2 topic pub --once /robot_29/manual_lr \
+ros2 topic pub --once /waverover_29/manual_lr \
   std_msgs/msg/Float32MultiArray "{data: [0.3, 0.7]}"
 ```
 
@@ -117,5 +117,5 @@ Then unplug and replug the device.
 ### Send messages manually
 Send a twist message
 ```
-ros2 topic pub /robot_29/cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.1, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 1.0}}"
+ros2 topic pub /waverover_29/cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.1, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 1.0}}"
 ```

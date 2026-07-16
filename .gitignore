@@ -33,3 +33,4 @@ Thumbs.db
 *.tmp
 *.swp
 *~
+/waverover/config/robot_identity.yaml

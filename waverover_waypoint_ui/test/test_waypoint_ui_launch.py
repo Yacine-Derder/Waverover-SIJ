@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 
 from launch import LaunchContext
+from launch.actions import DeclareLaunchArgument
 from launch_ros.actions import Node
 from launch_ros.utilities import evaluate_parameters
 
@@ -32,3 +33,11 @@ def test_robot_name_launch_parameter_stays_a_string():
     assert isinstance(parameters['robot_name'], str)
     assert parameters['pose_source'] == 'MCS'
     assert isinstance(parameters['terminal_device'], str)
+
+    robot_argument = next(
+        entity
+        for entity in module.generate_launch_description().entities
+        if isinstance(entity, DeclareLaunchArgument)
+        and entity.name == 'robot_name'
+    )
+    assert robot_argument.default_value is None

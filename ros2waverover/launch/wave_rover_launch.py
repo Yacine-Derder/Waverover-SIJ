@@ -15,7 +15,7 @@ from waverover.stack_config import (
 )
 
 
-STACK_DEFAULTS = load_stack_config()
+STACK_DEFAULTS = load_stack_config(require_identity=False)
 
 
 def _launch_bridge(context):
@@ -66,13 +66,14 @@ def _launch_bridge(context):
 
 
 def generate_launch_description():
+    onboard_config = load_stack_config(require_identity=True)
     communication = required(STACK_DEFAULTS, 'communication')
     bridge = required(STACK_DEFAULTS, 'bridge')
 
     return LaunchDescription([
         DeclareLaunchArgument(
             'robot_name',
-            default_value=str(required(STACK_DEFAULTS, 'robot_name')),
+            default_value=str(required(onboard_config, 'robot_name')),
             description='Robot ID used to derive all robot-specific names',
         ),
         DeclareLaunchArgument(

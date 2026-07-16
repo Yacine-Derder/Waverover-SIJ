@@ -10,10 +10,10 @@ from waverover_waypoint_ui.waypoint_ui import (
 
 
 def test_robot_topic_and_frame_derivation():
-    assert waypoint_topic('29') == '/robot_29/waypoints'
-    assert waypoint_topic('30') == '/robot_30/waypoints'
-    assert map_frame('29') == 'robot_29/map'
-    assert waypoint_frame('30', 'SLAM') == 'robot_30/map'
+    assert waypoint_topic('29') == '/waverover_29/waypoints'
+    assert waypoint_topic('30') == '/waverover_30/waypoints'
+    assert map_frame('29') == 'waverover_29/map'
+    assert waypoint_frame('30', 'SLAM') == 'waverover_30/map'
     assert waypoint_frame('30', 'MCS') == 'robotics_lab'
 
 

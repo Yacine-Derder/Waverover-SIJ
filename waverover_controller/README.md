@@ -9,10 +9,10 @@ The controller supports two pose providers without duplicating navigation
 logic:
 
 - `pose_source=SLAM` looks up
-  `robot_<ID>/map -> robot_<ID>/base_footprint` on TF and accepts waypoints in
-  `robot_<ID>/map`.
+  `waverover_<ID>/map -> waverover_<ID>/base_footprint` on TF and accepts
+  waypoints in `waverover_<ID>/map`.
 - `pose_source=MCS` consumes the latest valid PoseStamped on the derived
-  `/macortex_bridge/robot_<ID>/pose` topic and accepts waypoints in the
+  `/macortex_bridge/waverover_<ID>/pose` topic and accepts waypoints in the
   configured MCS frame, normally `robotics_lab`. It does not create or require
   a SLAM TF listener.
 
@@ -40,12 +40,12 @@ ros2 launch waverover_controller waypoint_controller.launch.py \
 For MCS robot 29, a waypoint can be queued with:
 
 ```bash
-ros2 topic pub --once /robot_29/waypoints \
+ros2 topic pub --once /waverover_29/waypoints \
   geometry_msgs/msg/PointStamped \
   "{header: {frame_id: robotics_lab}, point: {x: 1.0, y: 2.0, z: 0.0}}"
 ```
 
-For SLAM, use `frame_id: robot_29/map` instead. Waypoints append to an
+For SLAM, use `frame_id: waverover_29/map` instead. Waypoints append to an
 in-memory FIFO. Before the first waypoint both modes stop. After the queue
 completes, twist mode stops and fixed-wing mode loiters; a new waypoint exits
 loiter. TF or MCS pose failure leaves the queue unchanged.

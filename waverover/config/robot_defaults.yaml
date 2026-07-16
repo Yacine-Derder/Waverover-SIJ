@@ -1,9 +1,8 @@
 # Canonical deployment defaults for the complete WaveRover stack.
 #
-# Change robot_name for a new rover. Namespaces, robot topics, and TF frame
-# IDs are derived from it; do not embed a robot ID elsewhere in configuration.
+# These values are shared by every rover. Per-machine robot identity belongs in
+# the ignored robot_identity.yaml file; see robot_identity.example.yaml.
 schema_version: 1
-robot_name: "29"
 control_mode: fixed_wing
 pose_source: MCS
 namespace_prefix: waverover_
@@ -37,7 +36,7 @@ frames:
   lidar: laser
 
 # The operator-laptop bridge is external to this stack. Its topic embeds the
-# derived robot namespace so changing robot_name updates the subscription.
+# derived robot namespace so selecting another identity updates the subscription.
 mcs:
   pose_topic_pattern: /macortex_bridge/{robot_namespace}/pose
   frame: robotics_lab

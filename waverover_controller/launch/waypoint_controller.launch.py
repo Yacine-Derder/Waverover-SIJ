@@ -17,7 +17,7 @@ from waverover.stack_config import (
 )
 
 
-STACK_DEFAULTS = load_stack_config()
+STACK_DEFAULTS = load_stack_config(require_identity=False)
 
 
 def _launch_waypoint_controller(context):
@@ -81,10 +81,11 @@ def _launch_waypoint_controller(context):
 
 
 def generate_launch_description():
+    onboard_config = load_stack_config(require_identity=True)
     return LaunchDescription([
         DeclareLaunchArgument(
             'robot_name',
-            default_value=str(required(STACK_DEFAULTS, 'robot_name')),
+            default_value=str(required(onboard_config, 'robot_name')),
             description='Robot ID used to derive all robot-specific names',
         ),
         DeclareLaunchArgument(

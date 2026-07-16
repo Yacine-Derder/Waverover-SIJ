@@ -3,18 +3,20 @@
 Run this separately on the operator laptop:
 
 ```bash
-ros2 launch waverover_waypoint_ui waypoint_ui.launch.py
+ros2 launch waverover_waypoint_ui waypoint_ui.launch.py \
+  robot_name:=131 pose_source:=MCS
 ```
 
-It reads `robot_name` and `pose_source` from the central configuration. A
-temporary override must match the onboard stack, for example:
+It loads shared defaults but never reads a rover-local identity file.
+`robot_name` is a required launch argument; `pose_source` defaults to the
+shared MCS setting and can be overridden to match the target rover:
 
 ```bash
 ros2 launch waverover_waypoint_ui waypoint_ui.launch.py \
-  robot_name:=29 pose_source:=MCS
+  robot_name:=131 pose_source:=MCS
 ```
 
-SLAM waypoints use `robot_<ID>/map`; MCS waypoints use the configured MCS
+SLAM waypoints use `waverover_<ID>/map`; MCS waypoints use the configured MCS
 frame, normally `robotics_lab`. The prompt shows the selected source, frame,
 and destination topic.
 
@@ -30,7 +32,7 @@ quit
 ```
 
 For robot 30 the cached reliable publisher writes
-`geometry_msgs/msg/PointStamped` to `/robot_30/waypoints`. Message timestamps
+`geometry_msgs/msg/PointStamped` to `/waverover_30/waypoints`. Message timestamps
 come from the local ROS clock. The application uses the controlling terminal,
 so it works in a local shell, VS Code terminal, or interactive SSH session
 without an X display.

@@ -48,7 +48,7 @@ def make_provider(timeout=0.5):
     node = FakeNode()
     provider = McsPoseProvider(
         node,
-        '/macortex_bridge/robot_29/pose',
+        '/macortex_bridge/waverover_29/pose',
         'robotics_lab',
         timeout,
         10,
@@ -74,7 +74,7 @@ def test_mcs_provider_requires_a_valid_pose_and_extracts_yaw():
 def test_mcs_provider_rejects_wrong_frame_and_non_finite_values():
     node, provider = make_provider()
 
-    provider._pose_callback(make_pose(frame='robot_29/map'))
+    provider._pose_callback(make_pose(frame='waverover_29/map'))
     invalid = make_pose()
     invalid.pose.position.x = float('nan')
     provider._pose_callback(invalid)

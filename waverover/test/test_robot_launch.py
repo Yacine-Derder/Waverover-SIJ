@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 
 from launch import LaunchContext
+from launch.actions import DeclareLaunchArgument
 
 
 def load_robot_launch_module():
@@ -73,3 +74,23 @@ def test_manual_lr_mode_does_not_start_an_incompatible_controller():
     assert [(item[0], item[1]) for item in includes] == [
         ('ros2waverover', 'wave_rover_launch.py'),
     ]
+
+
+def test_onboard_launch_defaults_to_explicit_test_identity(
+    tmp_path,
+    monkeypatch,
+):
+    identity = tmp_path / 'identity.yaml'
+    identity.write_text('robot_name: "test_131"\n', encoding='utf-8')
+    monkeypatch.setenv('WAVEROVER_IDENTITY_FILE', str(identity))
+    module = load_robot_launch_module()
+    declaration = next(
+        action
+        for action in module.generate_launch_description().entities
+        if isinstance(action, DeclareLaunchArgument)
+        and action.name == 'robot_name'
+    )
+    context = LaunchContext()
+    assert ''.join(
+        item.perform(context) for item in declaration.default_value
+    ) == 'test_131'

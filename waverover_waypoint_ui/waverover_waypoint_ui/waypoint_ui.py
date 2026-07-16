@@ -19,7 +19,7 @@ from waverover.stack_config import (
 )
 
 
-STACK_DEFAULTS = load_stack_config()
+STACK_DEFAULTS = load_stack_config(require_identity=False)
 
 
 def validate_robot_id(value):
@@ -51,7 +51,8 @@ def map_frame(robot_id):
 
 
 def parse_terminal_command(command, current_robot_id):
-    """Parse one terminal command into an action tuple.
+    """
+    Parse one terminal command into an action tuple.
 
     Supported waypoint forms are ``X Y`` for the current robot and
     ``ROBOT_ID X Y`` for an explicitly selected robot.
@@ -107,8 +108,9 @@ class WaypointPublisher(Node):
         super().__init__('waverover_waypoint_ui')
         self.default_robot_id = str(self.declare_parameter(
             'robot_name',
-            str(required(STACK_DEFAULTS, 'robot_name')),
+            '',
         ).value)
+        self.default_robot_id = validate_robot_id(self.default_robot_id)
         self.pose_source = normalize_pose_source(self.declare_parameter(
             'pose_source',
             str(required(STACK_DEFAULTS, 'pose_source')),

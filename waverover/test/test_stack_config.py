@@ -14,28 +14,92 @@ from waverover.stack_config import (
 )
 
 
-def test_canonical_defaults_and_robot_derivation():
-    config = load_stack_config()
+def write_identity(tmp_path, content):
+    path = tmp_path / 'identity.yaml'
+    path.write_text(content, encoding='utf-8')
+    return path
 
-    assert isinstance(config['robot_name'], str)
-    assert config['robot_name']
+
+def test_shared_defaults_and_robot_derivation():
+    config = load_stack_config(require_identity=False)
+
+    assert 'robot_name' not in config
     assert config['control_mode'] == 'fixed_wing'
-    assert config['pose_source'] == 'SLAM'
-    assert robot_namespace(config) == (
-        config['namespace_prefix'] + config['robot_name']
+    assert config['pose_source'] == 'MCS'
+    assert robot_namespace(config, '30') == 'waverover_30'
+    assert robot_frame(config, 'map', '30') == 'waverover_30/map'
+    assert robot_frame(config, 'base', '30') == (
+        'waverover_30/base_footprint'
     )
-    assert robot_namespace(config, '30') == 'robot_30'
-    assert robot_frame(config, 'map', '30') == 'robot_30/map'
-    assert robot_topic(config, 'cmd_vel', '30') == '/robot_30/cmd_vel'
+    assert robot_topic(config, 'cmd_vel', '30') == (
+        '/waverover_30/cmd_vel'
+    )
+    assert robot_topic(config, 'waypoints', '30') == (
+        '/waverover_30/waypoints'
+    )
     assert robot_topic(config, 'tf', '30') == '/tf'
-    assert mcs_pose_topic(config, '29') == (
-        '/macortex_bridge/robot_29/pose'
+    assert mcs_pose_topic(config, '131') == (
+        '/macortex_bridge/waverover_131/pose'
     )
-    assert mcs_pose_topic(config, '30') == (
-        '/macortex_bridge/robot_30/pose'
+    assert waypoint_global_frame(config, 'SLAM', '30') == (
+        'waverover_30/map'
     )
-    assert waypoint_global_frame(config, 'SLAM', '30') == 'robot_30/map'
     assert waypoint_global_frame(config, 'MCS', '30') == 'robotics_lab'
+
+
+def test_shared_defaults_are_independent():
+    first = load_stack_config(require_identity=False)
+    first['topics']['cmd_vel'] = 'changed'
+    second = load_stack_config(require_identity=False)
+    assert second['topics']['cmd_vel'] == 'cmd_vel'
+
+
+def test_explicit_identity_and_whitespace_normalization(tmp_path, monkeypatch):
+    monkeypatch.delenv('WAVEROVER_IDENTITY_FILE', raising=False)
+    identity = write_identity(tmp_path, 'robot_name: " 131 "\n')
+    config = load_stack_config(identity_path=identity)
+    assert config['robot_name'] == '131'
+
+
+def test_environment_identity_and_priority(tmp_path, monkeypatch):
+    explicit = write_identity(tmp_path, 'robot_name: "wrong"\n')
+    environment = tmp_path / 'environment.yaml'
+    environment.write_text('robot_name: "131"\n', encoding='utf-8')
+    monkeypatch.setenv('WAVEROVER_IDENTITY_FILE', str(environment))
+    config = load_stack_config(identity_path=explicit)
+    assert config['robot_name'] == '131'
+
+
+def test_missing_identity_is_only_an_error_when_required(tmp_path, monkeypatch):
+    missing = tmp_path / 'missing.yaml'
+    monkeypatch.delenv('WAVEROVER_IDENTITY_FILE', raising=False)
+    assert 'robot_name' not in load_stack_config(require_identity=False)
+    with pytest.raises(StackConfigError, match=str(missing)):
+        load_stack_config(identity_path=missing)
+
+
+@pytest.mark.parametrize(
+    ('content', 'message'),
+    [
+        ('', 'mapping'),
+        ('[131]\n', 'mapping'),
+        ('robot_name: [broken\n', 'parse'),
+        ('other: 131\n', 'missing robot_name'),
+        ('robot_name: 131\nother: value\n', 'unexpected keys'),
+        ('robot_name: "bad-name"\n', 'robot_name'),
+        ('robot_name: ""\n', 'robot_name'),
+    ],
+)
+def test_invalid_identities_are_actionable(
+    tmp_path,
+    monkeypatch,
+    content,
+    message,
+):
+    monkeypatch.delenv('WAVEROVER_IDENTITY_FILE', raising=False)
+    identity = write_identity(tmp_path, content)
+    with pytest.raises(StackConfigError, match=message):
+        load_stack_config(identity_path=identity)
 
 
 @pytest.mark.parametrize('value', ['twist', 'FIXED_WING', 'manual_lr'])
@@ -58,7 +122,7 @@ def test_unknown_pose_source_is_rejected():
 
 
 def test_manual_ui_command_uses_derived_namespace():
-    command = manual_lr_command(load_stack_config(), '30')
-
-    assert '__ns:=/robot_30' in command
+    config = load_stack_config(require_identity=False)
+    command = manual_lr_command(config, '30')
+    assert '__ns:=/waverover_30' in command
     assert 'topic:=manual_lr' in command

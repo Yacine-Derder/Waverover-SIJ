@@ -15,7 +15,10 @@ setup(
         ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
         (
             'share/' + package_name + '/config',
-            ['config/robot_defaults.yaml'],
+            [
+                'config/robot_defaults.yaml',
+                'config/robot_identity.example.yaml',
+            ],
         ),
     ],
     install_requires=['setuptools'],

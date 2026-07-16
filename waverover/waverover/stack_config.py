@@ -1,4 +1,5 @@
 from copy import deepcopy
+import os
 from pathlib import Path
 import re
 from string import Formatter
@@ -40,34 +41,88 @@ def default_config_path():
     return installed_path or source_path
 
 
-def load_stack_config(config_path=None):
-    """Load and validate the canonical stack defaults."""
-    path = Path(config_path) if config_path else default_config_path()
+def default_identity_path(config_path=None):
+    """Return the source-tree identity path used by onboard processes."""
+    source_path = (
+        Path(__file__).resolve().parents[1]
+        / 'config'
+        / 'robot_identity.yaml'
+    )
+    if source_path.parent.is_dir():
+        return source_path
+    if config_path:
+        return Path(config_path).resolve().with_name('robot_identity.yaml')
+    return source_path
+
+
+def _load_yaml_mapping(path, description):
+    path = Path(path).expanduser()
     try:
         with path.open('r', encoding='utf-8') as stream:
-            config = yaml.safe_load(stream)
+            value = yaml.safe_load(stream)
     except OSError as error:
         raise StackConfigError(
-            'Could not read WaveRover stack configuration "%s": %s'
-            % (path, error)
+            'Could not read WaveRover %s "%s": %s'
+            % (description, path, error)
         ) from error
     except yaml.YAMLError as error:
         raise StackConfigError(
-            'Could not parse WaveRover stack configuration "%s": %s'
-            % (path, error)
+            'Could not parse WaveRover %s "%s": %s'
+            % (description, path, error)
         ) from error
-
-    if not isinstance(config, dict):
+    if not isinstance(value, dict):
         raise StackConfigError(
-            'WaveRover stack configuration root must be a mapping.'
+            'WaveRover %s "%s" root must be a YAML mapping.'
+            % (description, path)
         )
+    return value
+
+
+def load_robot_identity(identity_path=None, config_path=None):
+    """Load the strict per-machine identity, honoring the environment."""
+    environment_path = os.environ.get('WAVEROVER_IDENTITY_FILE')
+    path = Path(environment_path) if environment_path else (
+        Path(identity_path) if identity_path else default_identity_path(
+            config_path
+        )
+    )
+    identity = _load_yaml_mapping(path, 'robot identity')
+    keys = set(identity)
+    if keys != {'robot_name'}:
+        missing = ' missing robot_name;' if 'robot_name' not in keys else ''
+        unexpected = sorted(keys - {'robot_name'})
+        extra = (
+            ' unexpected keys: %s;' % ', '.join(unexpected)
+            if unexpected else ''
+        )
+        raise StackConfigError(
+            'Invalid WaveRover robot identity "%s":%s%s expected exactly '
+            'one key: robot_name.' % (path, missing, extra)
+        )
+    try:
+        robot_name = validate_robot_name(identity['robot_name'])
+    except StackConfigError as error:
+        raise StackConfigError(
+            'Invalid WaveRover robot identity "%s": %s' % (path, error)
+        ) from error
+    return {'robot_name': robot_name}
+
+
+def load_stack_config(
+    require_identity=True,
+    config_path=None,
+    identity_path=None,
+):
+    """Load shared defaults and, for onboard use, per-machine identity."""
+    path = Path(config_path) if config_path else default_config_path()
+    config = _load_yaml_mapping(path, 'stack configuration')
+
     if config.get('schema_version') != 1:
         raise StackConfigError(
             'Unsupported WaveRover configuration schema_version: %r'
             % config.get('schema_version')
         )
 
-    config['robot_name'] = validate_robot_name(required(config, 'robot_name'))
     config['control_mode'] = normalize_control_mode(
         required(config, 'control_mode')
     )
@@ -149,7 +204,7 @@ def load_stack_config(config_path=None):
     mcs_qos_depth = required(config, 'mcs', 'qos_depth')
     if not isinstance(mcs_qos_depth, int) or mcs_qos_depth <= 0:
         raise StackConfigError('mcs.qos_depth must be a positive integer.')
-    mcs_pose_topic(config)
+    mcs_pose_topic(config, 'validation')
 
     loiter_direction = str(required(
         config,
@@ -164,6 +219,13 @@ def load_stack_config(config_path=None):
     config['waypoint_controller'][
         'final_loiter_direction'
     ] = loiter_direction
+    if 'robot_name' in config:
+        raise StackConfigError(
+            'Shared WaveRover stack configuration "%s" must not contain '
+            'robot_name; put it in robot_identity.yaml.' % path
+        )
+    if require_identity:
+        config.update(load_robot_identity(identity_path, path))
     return deepcopy(config)
 
 
@@ -184,6 +246,8 @@ def required(config, *keys):
 
 def validate_robot_name(value):
     """Validate and normalize a deployment robot ID."""
+    if value is None:
+        raise StackConfigError('robot_name must not be empty.')
     robot_name = str(value).strip()
     if not ROBOT_NAME_PATTERN.fullmatch(robot_name):
         raise StackConfigError(

@@ -1,0 +1,22 @@
+[Unit]
+Description=Update and build WaveRover before launch
+Wants=network-online.target
+After=network-online.target
+Before=waverover.service
+
+[Service]
+Type=oneshot
+User=waverover
+Group=waverover
+WorkingDirectory=/home/waverover/ros2_ws
+Environment=REPO_DIR=/home/waverover/ros2_ws/src
+Environment=WORKSPACE_DIR=/home/waverover/ros2_ws
+Environment=IDENTITY_FILE=/home/waverover/ros2_ws/src/waverover/config/robot_identity.yaml
+Environment=WAVEROVER_IDENTITY_FILE=/home/waverover/ros2_ws/src/waverover/config/robot_identity.yaml
+Environment=REMOTE=origin
+Environment=BRANCH=main
+EnvironmentFile=-/etc/default/waverover-update
+ExecStart=/usr/local/lib/waverover/update_and_build.sh
+TimeoutStartSec=15min
+StandardOutput=journal
+StandardError=journal

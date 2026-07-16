@@ -121,6 +121,39 @@ def test_missing_install_triggers_build(deployment):
     assert build_count(deployment) == 1
 
 
+def test_ros_setup_allows_optional_unset_variable(deployment):
+    setup_log = deployment.root / 'ros_setup.log'
+    deployment.ros_setup.write_text(
+        ': "$OPTIONAL_ROS_SETUP_VARIABLE"\n'
+        'printf "sourced\\n" > "$MOCK_ROS_SETUP_LOG"\n'
+        'export MOCK_ROS_SETUP_COMPLETE=1\n',
+        encoding='utf-8',
+    )
+    deployment.install.unlink()
+
+    result = deployment.invoke(
+        MOCK_ROS_SETUP_LOG=str(setup_log),
+        BUILD_COMMAND=(
+            f'[[ $MOCK_ROS_SETUP_COMPLETE == 1 ]] && {deployment.build}'
+        ),
+    )
+
+    assert result.returncode == 0
+    assert setup_log.read_text(encoding='utf-8') == 'sourced\n'
+    assert build_count(deployment) == 1
+
+
+def test_failed_ros_setup_returns_clear_error(deployment):
+    deployment.ros_setup.write_text('return 1\n', encoding='utf-8')
+    deployment.install.unlink()
+
+    result = deployment.invoke()
+
+    assert result.returncode != 0
+    assert f'failed to source ROS setup: {deployment.ros_setup}' in result.stdout
+    assert build_count(deployment) == 0
+
+
 def test_offline_fetch_is_non_blocking(deployment):
     run(['git', 'remote', 'set-url', 'origin', str(deployment.root / 'gone')],
         deployment.repo)

@@ -1,0 +1,80 @@
+from dataclasses import replace
+import math
+
+import pytest
+
+from waverover_swarm_controller.controllers import controller_from_config
+from waverover_swarm_controller.controllers.heuristic import HeuristicController
+from waverover_swarm_controller.models import SwarmSnapshot
+
+
+def with_algorithm(config, algorithm):
+    return replace(
+        config,
+        controller=replace(config.controller, algorithm=algorithm),
+    )
+
+
+@pytest.mark.parametrize(
+    'algorithm',
+    [
+        'heuristic',
+        'heuristic_decentralized',
+        'convex',
+        'mpc_centralized',
+        'mpc_distributed',
+    ],
+)
+def test_available_controllers_are_deterministic_and_id_safe(
+    algorithm, example_config, snapshot
+):
+    config = with_algorithm(example_config, algorithm)
+    first_controller = controller_from_config(config)
+    available, reason = first_controller.availability()
+    if not available:
+        pytest.skip(reason)
+    first = first_controller.compute(snapshot)
+
+    reversed_snapshot = SwarmSnapshot(
+        frame_id=snapshot.frame_id,
+        robots=dict(reversed(tuple(snapshot.robots.items()))),
+        targets=dict(reversed(tuple(snapshot.targets.items()))),
+        station=snapshot.station,
+        created_at=snapshot.created_at,
+    )
+    second = controller_from_config(config).compute(reversed_snapshot)
+
+    assert tuple(first.setpoints) == tuple(sorted(snapshot.robots))
+    assert first.setpoints == second.setpoints
+    assert all(
+        len(point) == 2 and all(math.isfinite(value) for value in point)
+        for point in first.setpoints.values()
+    )
+    valid_nodes = set(snapshot.robots) | {snapshot.station.station_id}
+    assert all(
+        first_id in valid_nodes and second_id in valid_nodes
+        for first_id, second_id in first.selected_edges
+    )
+    if algorithm.startswith('mpc_'):
+        assert all(len(path) >= 2 for path in first.predicted_paths.values())
+
+
+def test_central_heuristic_matches_small_reference_chain(
+    example_config, snapshot
+):
+    result = HeuristicController(example_config).compute(snapshot)
+
+    rounded = {
+        tuple(round(value, 6) for value in point)
+        for point in result.setpoints.values()
+    }
+    # The simulator executable behavior creates two main-target relay slots;
+    # the deliberate edge fix leaves the insufficient third rover at station.
+    assert rounded == {(0.0, 0.0), (1.25, 0.0), (2.5, 0.0)}
+
+
+def test_relay_count_handles_coincident_and_short_targets(example_config):
+    controller = HeuristicController(example_config)
+
+    assert controller.optimal_relay_count(0.0) == 0
+    assert controller.optimal_relay_count(0.01) >= 1

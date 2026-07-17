@@ -1,4 +1,5 @@
 from copy import deepcopy
+import math
 import os
 from pathlib import Path
 import re
@@ -158,6 +159,7 @@ def load_stack_config(
     for topic_key in (
         'cmd_vel',
         'waypoints',
+        'end_trial',
         'scan',
         'imu',
         'odom',
@@ -205,6 +207,17 @@ def load_stack_config(
     if not isinstance(mcs_qos_depth, int) or mcs_qos_depth <= 0:
         raise StackConfigError('mcs.qos_depth must be a positive integer.')
     mcs_pose_topic(config, 'validation')
+
+    refresh_rate_hz = required(config, 'waypoint_ui', 'refresh_rate_hz')
+    if (
+        not isinstance(refresh_rate_hz, (int, float))
+        or isinstance(refresh_rate_hz, bool)
+        or not math.isfinite(float(refresh_rate_hz))
+        or refresh_rate_hz <= 0.0
+    ):
+        raise StackConfigError(
+            'waypoint_ui.refresh_rate_hz must be a positive finite number.'
+        )
 
     loiter_direction = str(required(
         config,

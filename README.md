@@ -34,6 +34,7 @@ running on each rover.
 ```mermaid
 flowchart LR
     UI["Operator waypoint UI"] -->|"PointStamped /waverover_ID/waypoints"| CTRL["Waypoint controller"]
+    UI -->|"Empty /waverover_ID/end_trial"| CTRL
     MCS["External MCS bridge"] -->|"PoseStamped /macortex_bridge/waverover_ID/pose"| CTRL
     CTRL -->|"Twist /waverover_ID/cmd_vel"| BRIDGE["ROS 2 to UART bridge"]
     BRIDGE -->|"JSON wheel commands"| BASE["WaveRover base controller"]
@@ -204,8 +205,12 @@ time, so synchronized wall clocks are not required. If the pose is missing or
 stale, the controller publishes the explicit safe-stop command while retaining
 the waypoint queue. It resumes automatically when a valid pose returns.
 
-Waypoints with the wrong frame or non-finite coordinates are rejected. The
-queue is not persisted across process restarts.
+Waypoints with the wrong frame or non-finite coordinates are rejected. Since
+the operator UI refreshes targets, the controller suppresses a consecutive
+coordinate duplicate while an equivalent target is still last in the FIFO.
+Once the queue is empty, the same coordinate is accepted again so a rover that
+has drifted away can resume navigation. The queue is not persisted across
+process restarts.
 
 ### `waverover_waypoint_ui`
 
@@ -213,11 +218,13 @@ This package is intended primarily for the operator computer. It loads shared
 topic and frame conventions but deliberately does not load a rover-local
 identity file.
 
-The user selects a target rover explicitly. The UI caches one reliable
-publisher per selected rover and sends `PointStamped` messages to the derived
-waypoint topic. It opens the controlling terminal directly, which keeps it
-interactive under a local shell, VS Code terminal, or SSH session without a
-graphical display.
+The user selects a target rover explicitly. After a rover receives a waypoint,
+the UI remembers that rover's newest target and republishes it at 1 Hz by
+default with a fresh timestamp and the correct per-rover frame. Targets for
+different rovers are refreshed independently. The UI caches reliable waypoint
+and end-trial publishers for each commanded rover. It opens the controlling
+terminal directly, which keeps it interactive under a local shell, VS Code
+terminal, or SSH session without a graphical display.
 
 ### `ldlidar_stl_ros2`
 
@@ -303,6 +310,7 @@ For `robot_name: "132"`, the derived namespace is `waverover_132`.
 | --- | --- | --- |
 | Velocity command | `geometry_msgs/msg/Twist` | `/waverover_<ID>/cmd_vel` |
 | Waypoint input | `geometry_msgs/msg/PointStamped` | `/waverover_<ID>/waypoints` |
+| End-trial signal | `std_msgs/msg/Empty` | `/waverover_<ID>/end_trial` |
 | Raw IMU | `sensor_msgs/msg/Imu` | `/waverover_<ID>/imu/data_raw` |
 | Laser scan | `sensor_msgs/msg/LaserScan` | `/waverover_<ID>/scan` |
 | RF2O odometry | `nav_msgs/msg/Odometry` | `/waverover_<ID>/odom_rf2o` |
@@ -367,7 +375,11 @@ The current bridge constants in `RobotController.cpp` are:
 A normal all-zero `Twist` means straight motion in fixed-wing mode. To avoid
 ambiguity, the controller requests an explicit fixed-wing stop by publishing a
 `Twist` whose only non-zero field is `angular.x = 1.0`. This marker is used
-while waiting for the first waypoint and when pose data is unavailable.
+while waiting for the first waypoint, when pose data is unavailable, and after
+an end-trial signal. End-trial clears the FIFO and loiter state, latches this
+safe stop on every controller cycle, and therefore cannot enter final loiter.
+An ordinary all-zero `Twist` keeps its existing fixed-wing meaning. A later
+valid waypoint clears the latch and begins a new trial.
 
 ### Manual left/right mode
 
@@ -520,13 +532,28 @@ Interactive commands are:
 1.0 2.0          send (1.0, 2.0) to the selected robot
 133 1.0 2.0      select robot 133 and send the waypoint
 robot 134        change target without sending
-status           show destination and recent sends
+status           show destination, refreshed targets, commanded rovers, and recent sends
+end              stop refreshes and signal end-trial to all commanded rovers
+end trial        alias for end
 help             show command help
 quit             exit
 ```
 
 The UI frame must match the target controller's pose source. MCS waypoints use
 `robotics_lab` by default. SLAM waypoints use `waverover_<ID>/map`.
+
+Each rover's latest target is refreshed independently at
+`waypoint_ui.refresh_rate_hz` (1 Hz by default). This lets the controller
+re-accept a final target after its FIFO became empty and correct physical drift
+without wheel encoders. Consecutive duplicate suppression is necessary so the
+same refresh stream does not grow the FIFO while a target is still queued.
+
+`end` first stops all refresh timers, then publishes reliable `Empty` messages
+on `/waverover_<ID>/end_trial` for every rover that actually received a
+waypoint during the UI session. Merely selecting a rover does not include it.
+The same cleanup runs on `quit`, terminal EOF, Ctrl-C, and SIGTERM, and briefly
+drains ROS before publishers are destroyed. Sending another valid waypoint
+afterward restarts refreshes and begins a new trial on that rover.
 
 ### Publish a waypoint without the UI
 

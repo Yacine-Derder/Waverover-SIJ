@@ -36,6 +36,15 @@ def generate_launch_description():
             ),
         ),
         DeclareLaunchArgument(
+            'refresh_rate_hz',
+            default_value=str(required(
+                STACK_DEFAULTS,
+                'waypoint_ui',
+                'refresh_rate_hz',
+            )),
+            description='Rate for refreshing each rover latest waypoint',
+        ),
+        DeclareLaunchArgument(
             'terminal_device',
             default_value=_current_terminal_device(),
             description=(
@@ -56,6 +65,10 @@ def generate_launch_description():
                 'pose_source': ParameterValue(
                     LaunchConfiguration('pose_source'),
                     value_type=str,
+                ),
+                'refresh_rate_hz': ParameterValue(
+                    LaunchConfiguration('refresh_rate_hz'),
+                    value_type=float,
                 ),
                 'terminal_device': ParameterValue(
                     LaunchConfiguration('terminal_device'),

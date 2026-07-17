@@ -12,6 +12,7 @@ from waverover.stack_config import (
     StackConfigError,
     waypoint_global_frame,
 )
+import yaml
 
 
 def write_identity(tmp_path, content):
@@ -37,6 +38,10 @@ def test_shared_defaults_and_robot_derivation():
     assert robot_topic(config, 'waypoints', '30') == (
         '/waverover_30/waypoints'
     )
+    assert robot_topic(config, 'end_trial', '30') == (
+        '/waverover_30/end_trial'
+    )
+    assert config['waypoint_ui']['refresh_rate_hz'] == pytest.approx(1.0)
     assert robot_topic(config, 'tf', '30') == '/tf'
     assert mcs_pose_topic(config, '131') == (
         '/macortex_bridge/waverover_131/pose'
@@ -52,6 +57,31 @@ def test_shared_defaults_are_independent():
     first['topics']['cmd_vel'] = 'changed'
     second = load_stack_config(require_identity=False)
     assert second['topics']['cmd_vel'] == 'cmd_vel'
+
+
+@pytest.mark.parametrize('value', [0, -1, float('inf'), 'fast'])
+def test_invalid_waypoint_refresh_rate_is_rejected(tmp_path, value):
+    defaults = load_stack_config(require_identity=False)
+    defaults['waypoint_ui']['refresh_rate_hz'] = value
+    config_path = tmp_path / 'defaults.yaml'
+    config_path.write_text(yaml.safe_dump(defaults), encoding='utf-8')
+
+    with pytest.raises(StackConfigError, match='refresh_rate_hz'):
+        load_stack_config(require_identity=False, config_path=config_path)
+
+
+def test_end_trial_topic_is_required_and_relative(tmp_path):
+    defaults = load_stack_config(require_identity=False)
+    defaults['topics']['end_trial'] = '/global/end_trial'
+    config_path = tmp_path / 'defaults.yaml'
+    config_path.write_text(yaml.safe_dump(defaults), encoding='utf-8')
+    with pytest.raises(StackConfigError, match='topics.end_trial'):
+        load_stack_config(require_identity=False, config_path=config_path)
+
+    del defaults['topics']['end_trial']
+    config_path.write_text(yaml.safe_dump(defaults), encoding='utf-8')
+    with pytest.raises(StackConfigError, match='topics.end_trial'):
+        load_stack_config(require_identity=False, config_path=config_path)
 
 
 def test_explicit_identity_and_whitespace_normalization(tmp_path, monkeypatch):

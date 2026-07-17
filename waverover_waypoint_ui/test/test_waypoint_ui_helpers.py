@@ -1,6 +1,7 @@
 import pytest
 
 from waverover_waypoint_ui.waypoint_ui import (
+    end_trial_topic,
     map_frame,
     parse_terminal_command,
     validate_robot_id,
@@ -12,6 +13,7 @@ from waverover_waypoint_ui.waypoint_ui import (
 def test_robot_topic_and_frame_derivation():
     assert waypoint_topic('29') == '/waverover_29/waypoints'
     assert waypoint_topic('30') == '/waverover_30/waypoints'
+    assert end_trial_topic('30') == '/waverover_30/end_trial'
     assert map_frame('29') == 'waverover_29/map'
     assert waypoint_frame('30', 'SLAM') == 'waverover_30/map'
     assert waypoint_frame('30', 'MCS') == 'robotics_lab'
@@ -48,6 +50,11 @@ def test_robot_and_coordinates_can_be_entered_together():
 @pytest.mark.parametrize('command', ['robot 30', 'use 30', '30'])
 def test_robot_selection_commands(command):
     assert parse_terminal_command(command, '29') == ('robot', '30')
+
+
+@pytest.mark.parametrize('command', ['end', 'END', 'end trial', 'End Trial'])
+def test_end_trial_commands(command):
+    assert parse_terminal_command(command, '29') == ('end',)
 
 
 @pytest.mark.parametrize('command', ['nan 1', '1 inf', '1 2 3 4'])

@@ -1,0 +1,21 @@
+# Editable example: verify these coordinates against the robotics_lab origin
+# and available floor area before arming.
+frame_id: robotics_lab
+main_target_id: target_main
+
+targets:
+  - id: target_main
+    position: [2.5, 0.0]
+    weight: 10.0
+
+  - id: target_secondary_1
+    position: [0.0, 2.5]
+    weight: 1.0
+
+  - id: target_secondary_2
+    position: [-2.5, 0.0]
+    weight: 1.0
+
+  - id: target_secondary_3
+    position: [0.0, -2.5]
+    weight: 1.0

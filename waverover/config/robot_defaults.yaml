@@ -20,6 +20,7 @@ nodes:
 topics:
   cmd_vel: cmd_vel
   waypoints: waypoints
+  end_trial: end_trial
   scan: scan
   imu: imu/data_raw
   odom: odom_rf2o
@@ -97,6 +98,7 @@ manual_lr_ui:
   max_speed: 0.5
 
 waypoint_ui:
+  refresh_rate_hz: 1.0
   publisher_qos_depth: 50
   recent_send_limit: 20
 

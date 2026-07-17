@@ -22,6 +22,7 @@ def test_robot_name_launch_parameter_stays_a_string():
     context.launch_configurations['robot_name'] = '29'
     context.launch_configurations['pose_source'] = 'MCS'
     context.launch_configurations['terminal_device'] = ''
+    context.launch_configurations['refresh_rate_hz'] = '1.0'
     node = next(
         entity
         for entity in module.generate_launch_description().entities
@@ -33,6 +34,7 @@ def test_robot_name_launch_parameter_stays_a_string():
     assert isinstance(parameters['robot_name'], str)
     assert parameters['pose_source'] == 'MCS'
     assert isinstance(parameters['terminal_device'], str)
+    assert parameters['refresh_rate_hz'] == 1.0
 
     robot_argument = next(
         entity

@@ -9,6 +9,7 @@ from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
+from std_msgs.msg import Empty
 from tf2_ros import Buffer, TransformException, TransformListener
 from waverover.stack_config import (
     load_stack_config,
@@ -24,6 +25,7 @@ import yaml
 
 
 FIXED_WING_STOP_ANGULAR_X = 1.0
+WAYPOINT_COORDINATE_TOLERANCE_M = 1e-6
 
 
 @dataclass
@@ -34,6 +36,7 @@ class ControllerConfig:
     robot_frame: str
     cmd_vel_topic: str
     waypoint_topic: str
+    end_trial_topic: str
     control_rate_hz: float
     goal_tolerance_m: float
     heading_tolerance_deg: float
@@ -59,6 +62,7 @@ class ControllerConfig:
             robot_frame=robot_frame(stack_config, 'base', robot_name),
             cmd_vel_topic=str(topics['cmd_vel']),
             waypoint_topic=str(topics['waypoints']),
+            end_trial_topic=str(topics['end_trial']),
             control_rate_hz=float(controller['control_rate_hz']),
             goal_tolerance_m=float(controller['goal_tolerance_m']),
             heading_tolerance_deg=float(
@@ -304,6 +308,10 @@ class WaypointController(Node):
             'waypoint_topic',
             config.waypoint_topic
         ).value)
+        self.end_trial_topic = str(self.declare_parameter(
+            'end_trial_topic',
+            config.end_trial_topic
+        ).value)
         self.control_rate_hz = float(self.declare_parameter(
             'control_rate_hz',
             config.control_rate_hz
@@ -392,6 +400,16 @@ class WaypointController(Node):
             self._waypoint_callback,
             waypoint_qos,
         )
+        self.end_trial_subscription = self.create_subscription(
+            Empty,
+            self.end_trial_topic,
+            self._end_trial_callback,
+            QoSProfile(
+                history=HistoryPolicy.KEEP_LAST,
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+            ),
+        )
 
         if self.pose_source == 'SLAM':
             self.pose_provider = SlamTfPoseProvider(
@@ -412,6 +430,7 @@ class WaypointController(Node):
         self.last_bank_direction = None
         self.loiter_direction = None
         self.loitering = False
+        self.trial_ended = False
         self._pose_failure_active = False
         self._last_throttled_log = {}
 
@@ -441,6 +460,10 @@ class WaypointController(Node):
         self.get_logger().info(
             'Using %s and publishing Twist commands on %s.'
             % (pose_description, self.cmd_vel_publisher.topic_name)
+        )
+        self.get_logger().info(
+            'Listening for reliable end-trial signals on %s.'
+            % self.end_trial_subscription.topic_name
         )
 
         self.timer = self.create_timer(
@@ -556,10 +579,33 @@ class WaypointController(Node):
             )
             return
 
+        if (
+            self.waypoint_queue
+            and coordinates_equivalent(
+                self.waypoint_queue[-1],
+                (x, y),
+            )
+        ):
+            self._info_throttled(
+                'duplicate_waypoint',
+                'Suppressed refreshed duplicate waypoint (%.3f, %.3f); '
+                'queue_length=%d.' % (x, y, len(self.waypoint_queue)),
+                period_sec=5.0,
+            )
+            return
+
         queue_was_empty = not self.waypoint_queue
         was_loitering = self.loitering
+        was_trial_ended = self.trial_ended
+        self.trial_ended = False
         self.waypoint_queue.append((x, y))
         self.received_any_waypoint = True
+
+        if was_trial_ended:
+            self.get_logger().info(
+                'Valid waypoint received after end-trial; starting a new '
+                'trial.'
+            )
 
         if was_loitering:
             self.loitering = False
@@ -578,7 +624,31 @@ class WaypointController(Node):
                 % self.waypoint_queue[0]
             )
 
+    def _end_trial_callback(self, _message):
+        cleared_waypoints = len(self.waypoint_queue)
+        self.waypoint_queue.clear()
+        self.loitering = False
+        self.loiter_direction = None
+        self.last_bank_direction = None
+        self._pose_failure_active = False
+        self.trial_ended = True
+        command_name = self.publish_safe_stop()
+        self.get_logger().info(
+            'End-trial received; cleared %d waypoint(s), reset navigation '
+            'state, and latched command=%s.'
+            % (cleared_waypoints, command_name)
+        )
+
     def _control_step(self):
+        if self.trial_ended:
+            command_name = self.publish_safe_stop()
+            self._info_throttled(
+                'trial_ended',
+                'control_mode=%s queue_length=0 state=trial_ended command=%s'
+                % (self.control_mode, command_name),
+                period_sec=2.0,
+            )
+            return
         if not self.waypoint_queue:
             self._control_empty_queue()
             return
@@ -817,6 +887,24 @@ class WaypointController(Node):
 
         self._last_throttled_log[key] = now
         return True
+
+
+def coordinates_equivalent(first, second):
+    """Return whether two planar waypoint coordinates are refresh copies."""
+    return (
+        math.isclose(
+            first[0],
+            second[0],
+            rel_tol=0.0,
+            abs_tol=WAYPOINT_COORDINATE_TOLERANCE_M,
+        )
+        and math.isclose(
+            first[1],
+            second[1],
+            rel_tol=0.0,
+            abs_tol=WAYPOINT_COORDINATE_TOLERANCE_M,
+        )
+    )
 
 
 def main(args=None):

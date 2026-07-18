@@ -28,6 +28,10 @@ setup(
         'console_scripts': [
             'coordinator = '
             'waverover_swarm_controller.coordinator_node:main',
+            'synthetic_mcs = '
+            'waverover_swarm_controller.synthetic_mcs:main',
+            'visualize_targets = '
+            'waverover_swarm_controller.target_visualizer:main',
         ],
     },
 )

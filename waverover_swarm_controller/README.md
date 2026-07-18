@@ -63,16 +63,16 @@ retains local chain behavior but removes simulator display/color/battery state.
 The default model uses measurements from 2 m straight travel in 6 s and a
 0.30 m diameter circle completed in 2.5 s:
 
-| Parameter | Default |
-| --- | ---: |
-| Straight speed | `0.333333 m/s` |
-| Turn radius | `0.15 m` |
-| Bank yaw rate | `2.513274 rad/s` |
-| Turning-path speed | `0.376991 m/s` |
-| Outer control/MPC period | `1.0 s` |
-| MPC maximum step | `0.333333 m` |
-| Minimum MPC lookahead | `0.30 m` |
-| MPC horizon | `5` |
+| Parameter                |            Default |
+| ------------------------ | -----------------: |
+| Straight speed           |   `0.333333 m/s` |
+| Turn radius              |         `0.15 m` |
+| Bank yaw rate            | `2.513274 rad/s` |
+| Turning-path speed       |   `0.376991 m/s` |
+| Outer control/MPC period |          `1.0 s` |
+| MPC maximum step         |     `0.333333 m` |
+| Minimum MPC lookahead    |         `0.30 m` |
+| MPC horizon              |              `5` |
 
 Turning-path speed differs slightly from straight speed. This is a calibrated
 hardware surrogate for the rover's fixed-wing-like straight/bank controller,
@@ -118,7 +118,7 @@ On an Ubuntu 24.04 ROS 2 Jazzy operator PC:
 sudo apt update
 sudo apt install \
   python3-numpy python3-scipy python3-sklearn python3-networkx \
-  python3-cvxpy python3-yaml \
+  python3-cvxpy python3-matplotlib python3-yaml \
   ros-jazzy-diagnostic-msgs ros-jazzy-geometry-msgs ros-jazzy-nav-msgs \
   ros-jazzy-std-msgs ros-jazzy-std-srvs ros-jazzy-visualization-msgs
 
@@ -145,15 +145,15 @@ Dry-run computes controllers, validates safety, and publishes diagnostics and
 visualization, but never publishes a waypoint or startup `end_trial`. It cannot
 be armed. Algorithm changes require stopping/disarming and relaunching.
 
-| Purpose | Topic/service |
-| --- | --- |
-| MCS input | `/macortex_bridge/waverover_<ID>/pose` |
-| FIFO waypoint output | `/waverover_<ID>/waypoints` |
-| Reliable stop | `/waverover_<ID>/end_trial` |
-| Arm/disarm | `/waverover_swarm/arm` (`SetBool`) |
-| Diagnostics | `/waverover_swarm/diagnostics` |
-| Markers | `/waverover_swarm/markers` |
-| Predicted path | `/waverover_swarm/predicted_path/<ID>` |
+| Purpose              | Topic/service                            |
+| -------------------- | ---------------------------------------- |
+| MCS input            | `/macortex_bridge/waverover_<ID>/pose` |
+| FIFO waypoint output | `/waverover_<ID>/waypoints`            |
+| Reliable stop        | `/waverover_<ID>/end_trial`            |
+| Arm/disarm           | `/waverover_swarm/arm` (`SetBool`)   |
+| Diagnostics          | `/waverover_swarm/diagnostics`         |
+| Markers              | `/waverover_swarm/markers`             |
+| Predicted path       | `/waverover_swarm/predicted_path/waverover_<ID>` |
 
 The eventual physical-experiment command is:
 
@@ -174,6 +174,57 @@ synchronized; configuration/targets are valid; the selected controller and
 solver are available; a complete fresh result exists; and all initial
 setpoints and predicted paths pass frame, numeric, geofence, edge, and
 separation checks.
+
+## Synthetic MCS poses for PC-only tests
+
+`synthetic_mcs` publishes synchronized `PoseStamped` inputs for every rover ID
+in an experiment file. It places multiple rovers at deterministic, equally
+spaced points on a station-centered circle and places a single rover at the
+station. Before creating publishers it validates ID coverage, finite values,
+geofence containment, minimum separation, and communication connectivity to
+the station.
+
+This tool publishes **poses only**: it has no waypoint, `end_trial`, `cmd_vel`,
+or wheel-command publisher. It is exclusively for operator-PC development and
+smoke tests. **Never use synthetic MCS as localization during physical rover
+motion.**
+
+```bash
+ros2 launch waverover_swarm_controller synthetic_mcs.launch.py \
+  config_file:=/home/derder/ros2_ws/src/waverover_swarm_controller/config/smoke_test_6.yaml \
+  rate_hz:=20.0 \
+  radius_m:=0.5 \
+  angle_offset_rad:=0.0 \
+  yaw_rad:=0.0
+```
+
+The launch arguments are `config_file`, `rate_hz`, `radius_m`,
+`angle_offset_rad`, and `yaw_rad`. The node runs in the `/waverover_swarm`
+namespace while its MCS outputs use the canonical absolute fleet topics.
+
+## Target YAML visualizer
+
+Plot any valid targets file interactively, optionally overlaying the station,
+geofence, and ideal/maximum communication ranges from an experiment:
+
+```bash
+ros2 run waverover_swarm_controller visualize_targets \
+  /home/derder/ros2_ws/src/waverover_swarm_controller/config/targets_smoke_6.yaml \
+  --experiment-file /home/derder/ros2_ws/src/waverover_swarm_controller/config/smoke_test_6.yaml
+```
+
+For SSH or headless WSL, select the noninteractive backend with `--no-show`:
+
+```bash
+ros2 run waverover_swarm_controller visualize_targets \
+  /home/derder/ros2_ws/src/waverover_swarm_controller/config/targets_smoke_6.yaml \
+  --experiment-file /home/derder/ros2_ws/src/waverover_swarm_controller/config/smoke_test_6.yaml \
+  --output /tmp/targets_smoke_6.png \
+  --no-show
+```
+
+Output formats are selected by a `.png`, `.pdf`, or `.svg` extension. Use
+`--title` to override the plot title.
 
 ## FIFO-safe dispatch and stopping
 
@@ -199,13 +250,15 @@ limitation; use a physical emergency-stop process independent of this PC.
 
 ## Visualization and recording
 
-Markers show station, targets, setpoints, and selected edges. MPC paths are
-published as `nav_msgs/msg/Path`. Useful recording command:
+Markers show station, targets, setpoints, and selected edges. MPC controller
+variants publish predicted trajectories as `nav_msgs/msg/Path`; the heuristic
+controllers do not produce or publish predicted paths. Useful recording
+command:
 
 ```bash
 ros2 bag record \
   /waverover_swarm/diagnostics /waverover_swarm/markers \
-  /waverover_swarm/predicted_path/131 \
+  /waverover_swarm/predicted_path/waverover_131 \
   /macortex_bridge/waverover_131/pose \
   /waverover_131/waypoints /waverover_131/end_trial
 ```

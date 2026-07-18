@@ -15,6 +15,7 @@ from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import Empty
 from std_srvs.srv import SetBool
 from visualization_msgs.msg import Marker, MarkerArray
+from waverover.stack_config import robot_namespace
 
 from .config import ConfigError, load_experiment, SUPPORTED_ALGORITHMS
 from .controllers import controller_from_config
@@ -23,6 +24,11 @@ from .metrics import algebraic_connectivity, minimum_pairwise_distance
 from .pose_aggregation import PoseAggregator, SnapshotUnavailableError
 from .safety import SafetyViolation, validate_controller_result
 from .waypoint_dispatcher import WaypointDispatcher
+
+
+def predicted_path_topic(stack_config, robot_id):
+    """Return a relative, ROS-valid predicted-path topic for one rover."""
+    return 'predicted_path/' + robot_namespace(stack_config, robot_id)
 
 
 class SwarmCoordinator(Node):
@@ -106,7 +112,9 @@ class SwarmCoordinator(Node):
         )
         self.path_publishers = {
             robot_id: self.create_publisher(
-                Path, 'predicted_path/' + robot_id, reliable
+                Path,
+                predicted_path_topic(stack_config, robot_id),
+                reliable,
             )
             for robot_id in self.config.robot_ids
         }
@@ -238,6 +246,11 @@ class SwarmCoordinator(Node):
                 self._stop_trial('invalid controller cycle: %s' % error)
             self._publish_diagnostics()
             return
+        # Clear transient startup/missing-pose warnings after a valid cycle.
+        # Preserve faults from an armed trial until explicit rearming.
+        if not self.dispatcher.faulted:
+            self.latest_stop_reason = ''
+
         self.latest_snapshot = snapshot
         self.latest_result = result
         self.dispatcher.update_pending(result.setpoints)

@@ -12,7 +12,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
-from std_msgs.msg import Empty
+from std_msgs.msg import Empty, String
 from std_srvs.srv import SetBool
 from visualization_msgs.msg import Marker, MarkerArray
 from waverover.stack_config import robot_namespace
@@ -23,6 +23,7 @@ from .controllers.base import ControllerUnavailableError
 from .metrics import algebraic_connectivity, minimum_pairwise_distance
 from .pose_aggregation import PoseAggregator, SnapshotUnavailableError
 from .safety import SafetyViolation, validate_controller_result
+from .telemetry import build_controller_telemetry, canonical_json
 from .waypoint_dispatcher import WaypointDispatcher
 
 
@@ -57,6 +58,7 @@ class SwarmCoordinator(Node):
         )
         self.armed = False
         self.latest_result = None
+        self.latest_rejected_result = None
         self.latest_snapshot = None
         self.latest_stop_reason = 'startup: dry-run, disarmed'
         self.latest_handoff = 'none'
@@ -106,6 +108,9 @@ class SwarmCoordinator(Node):
 
         self.diagnostics_publisher = self.create_publisher(
             DiagnosticArray, 'diagnostics', reliable
+        )
+        self.telemetry_publisher = self.create_publisher(
+            String, 'controller_telemetry', reliable
         )
         self.markers_publisher = self.create_publisher(
             MarkerArray, 'markers', reliable
@@ -160,6 +165,7 @@ class SwarmCoordinator(Node):
                 self.config = selected
                 self.controller = controller_from_config(selected)
                 self.latest_result = None
+                self.latest_rejected_result = None
                 self.latest_stop_reason = (
                     'algorithm changed while disarmed; awaiting valid cycle'
                 )
@@ -173,9 +179,14 @@ class SwarmCoordinator(Node):
 
     def _compute_valid_result(self, snapshot):
         result = self.controller.compute(snapshot)
-        validate_controller_result(
-            self.config, snapshot, result, time.monotonic()
-        )
+        try:
+            validate_controller_result(
+                self.config, snapshot, result, time.monotonic()
+            )
+        except SafetyViolation:
+            self.latest_rejected_result = result
+            raise
+        self.latest_rejected_result = None
         return result
 
     def _arm_callback(self, request, response):
@@ -197,6 +208,7 @@ class SwarmCoordinator(Node):
             response.success = False
             response.message = reason
             return response
+        snapshot = None
         try:
             snapshot = self._snapshot()
             result = self._compute_valid_result(snapshot)
@@ -209,6 +221,11 @@ class SwarmCoordinator(Node):
         ) as error:
             response.success = False
             response.message = 'Arming rejected: %s' % error
+            self._publish_controller_telemetry(
+                snapshot,
+                self.latest_rejected_result,
+                'rejected' if self.latest_rejected_result else 'faulted',
+            )
             return response
         self.dispatcher.rearm()
         self.dispatcher.update_pending(result.setpoints)
@@ -217,6 +234,7 @@ class SwarmCoordinator(Node):
         self.armed = True
         self._end_sent_for_stop = False
         self.latest_stop_reason = ''
+        self._publish_controller_telemetry(snapshot, result, 'valid')
         self._dispatch(snapshot)
         response.success = True
         response.message = 'Armed with validated %s result.' % (
@@ -231,6 +249,7 @@ class SwarmCoordinator(Node):
             self.latest_stop_reason = str(error)
             if self.armed:
                 self._stop_trial('stale/incomplete required pose: %s' % error)
+            self._publish_controller_telemetry(None, None, 'faulted')
             self._publish_diagnostics()
             return
         try:
@@ -244,6 +263,12 @@ class SwarmCoordinator(Node):
             self.latest_stop_reason = str(error)
             if self.armed:
                 self._stop_trial('invalid controller cycle: %s' % error)
+            rejected = self.latest_rejected_result
+            self._publish_controller_telemetry(
+                snapshot,
+                rejected,
+                'rejected' if rejected is not None else 'faulted',
+            )
             self._publish_diagnostics()
             return
         # Clear transient startup/missing-pose warnings after a valid cycle.
@@ -256,6 +281,7 @@ class SwarmCoordinator(Node):
         self.dispatcher.update_pending(result.setpoints)
         if self.armed:
             self._dispatch(snapshot)
+        self._publish_controller_telemetry(snapshot, result, 'valid')
         self._publish_visualization(snapshot, result)
         self._publish_diagnostics()
 
@@ -304,23 +330,29 @@ class SwarmCoordinator(Node):
     def _publish_diagnostics(self):
         now = time.monotonic()
         ages = self.aggregator.pose_ages(now)
+        diagnostic_result = self.latest_rejected_result or self.latest_result
+        result_state = (
+            'rejected' if self.latest_rejected_result is not None
+            else ('valid' if self.latest_result is not None else 'none')
+        )
         values = {
             'algorithm': self.config.controller.algorithm,
             'dry_run': str(self.config.safety.dry_run),
             'armed': str(self.armed),
+            'controller_result_state': result_state,
             'solver_status': (
-                self.latest_result.solver_status if self.latest_result else 'none'
+                diagnostic_result.solver_status if diagnostic_result else 'none'
             ),
             'solve_duration_sec': (
-                '%.6f' % self.latest_result.solve_duration_sec
-                if self.latest_result else 'nan'
+                '%.6f' % diagnostic_result.solve_duration_sec
+                if diagnostic_result else 'nan'
             ),
             'stop_reason': self.latest_stop_reason,
             'commanded_robots': ','.join(self.dispatcher.commanded_robot_ids),
             'latest_handoff': self.latest_handoff,
             'selected_edges': (
-                str(self.latest_result.selected_edges)
-                if self.latest_result else 'none'
+                str(diagnostic_result.selected_edges)
+                if diagnostic_result else 'none'
             ),
         }
         for robot_id, age in ages.items():
@@ -364,6 +396,40 @@ class SwarmCoordinator(Node):
         message.header.stamp = self.get_clock().now().to_msg()
         message.status = [status]
         self.diagnostics_publisher.publish(message)
+
+    def _publish_controller_telemetry(self, snapshot, result, result_state):
+        """Publish analysis telemetry without participating in safety logic."""
+        try:
+            now = time.monotonic()
+            pose_ages = self.aggregator.pose_ages(now)
+            active = {
+                robot_id: state.active_waypoint
+                for robot_id, state in self.dispatcher.states.items()
+            }
+            pending = {
+                robot_id: state.pending_waypoint
+                for robot_id, state in self.dispatcher.states.items()
+            }
+            payload = build_controller_telemetry(
+                self.config,
+                snapshot,
+                result,
+                result_state,
+                self.get_clock().now().to_msg(),
+                self.armed,
+                self.latest_stop_reason,
+                pose_ages,
+                active,
+                pending,
+                self.latest_handoff,
+            )
+            message = String()
+            message.data = canonical_json(payload)
+            self.telemetry_publisher.publish(message)
+        except Exception as error:  # analysis output must not affect safety
+            self.get_logger().error(
+                'Controller telemetry publication failed: %s' % error
+            )
 
     def _publish_visualization(self, snapshot, result):
         stamp = self.get_clock().now().to_msg()

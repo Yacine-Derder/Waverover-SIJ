@@ -1,7 +1,9 @@
 import importlib.util
 from pathlib import Path
+import time
 from types import SimpleNamespace
 
+from builtin_interfaces.msg import Time
 from launch.actions import DeclareLaunchArgument
 from launch_ros.actions import Node
 from rclpy.validate_topic_name import validate_topic_name
@@ -11,6 +13,7 @@ from waverover_swarm_controller.coordinator_node import (
     SwarmCoordinator,
     predicted_path_topic,
 )
+from waverover_swarm_controller.models import ControllerResult
 
 
 def package_root():
@@ -57,6 +60,7 @@ def test_transient_pose_warning_clears_after_valid_cycle_but_fault_stays_latched
                 setpoints={'134': (0.0, 0.0)}
             )
             self._publish_visualization = lambda _snapshot, _result: None
+            self._publish_controller_telemetry = lambda *_args: None
             self._publish_diagnostics = lambda: None
 
     recovered = FakeCoordinator(faulted=False)
@@ -121,3 +125,137 @@ def test_synthetic_launch_exposes_typed_arguments_under_swarm_namespace():
     assert len(nodes) == 1
     assert nodes[0].node_executable == 'synthetic_mcs'
     assert nodes[0]._Node__node_namespace == 'waverover_swarm'
+
+
+def test_safety_rejected_optimization_never_reaches_dispatch_and_recovers(
+    example_config, snapshot
+):
+    now = time.monotonic()
+    unsafe_points = {
+        robot_id: state.position
+        for robot_id, state in snapshot.robots.items()
+    }
+    unsafe_points['robot_10'] = (1.0, 1.0)
+    unsafe_points['robot_2'] = (1.01, 1.0)
+    rejected = ControllerResult(
+        setpoints=unsafe_points,
+        selected_edges=(('robot_10', 'robot_2'),),
+        solver_status='optimal',
+        solve_duration_sec=0.125,
+        created_at=now,
+    )
+    valid = ControllerResult(
+        setpoints={
+            robot_id: state.position
+            for robot_id, state in snapshot.robots.items()
+        },
+        solver_status='optimal',
+        solve_duration_sec=0.100,
+        created_at=now,
+    )
+
+    class FakeDispatcher:
+        faulted = False
+
+        def __init__(self):
+            self.pending_updates = []
+
+        def update_pending(self, points):
+            self.pending_updates.append(points)
+
+    dispatcher = FakeDispatcher()
+    counters = {'dispatch': 0, 'visualization': 0, 'diagnostics': 0}
+    coordinator = SimpleNamespace(
+        config=example_config,
+        controller=SimpleNamespace(compute=lambda _snapshot: rejected),
+        dispatcher=dispatcher,
+        armed=False,
+        latest_result=None,
+        latest_rejected_result=None,
+        latest_snapshot=None,
+        latest_stop_reason='',
+        _snapshot=lambda: snapshot,
+        _publish_visualization=lambda *_args: counters.__setitem__(
+            'visualization', counters['visualization'] + 1
+        ),
+        _publish_diagnostics=lambda: counters.__setitem__(
+            'diagnostics', counters['diagnostics'] + 1
+        ),
+        _publish_controller_telemetry=lambda *_args: None,
+        _dispatch=lambda _snapshot: counters.__setitem__(
+            'dispatch', counters['dispatch'] + 1
+        ),
+    )
+    coordinator._compute_valid_result = lambda selected_snapshot: (
+        SwarmCoordinator._compute_valid_result(coordinator, selected_snapshot)
+    )
+
+    SwarmCoordinator._control_cycle(coordinator)
+
+    assert not coordinator.armed
+    assert coordinator.latest_result is None
+    assert coordinator.latest_rejected_result is rejected
+    assert dispatcher.pending_updates == []
+    assert counters['dispatch'] == 0
+    assert counters['visualization'] == 0
+    assert 'Immediate predicted separation' in coordinator.latest_stop_reason
+
+    coordinator.controller = SimpleNamespace(compute=lambda _snapshot: valid)
+    SwarmCoordinator._control_cycle(coordinator)
+
+    assert not coordinator.armed
+    assert coordinator.latest_stop_reason == ''
+    assert coordinator.latest_result is valid
+    assert coordinator.latest_rejected_result is None
+    assert dispatcher.pending_updates == [valid.setpoints]
+    assert counters['dispatch'] == 0
+    assert counters['visualization'] == 1
+
+
+def test_rejected_solver_metadata_is_labeled_rejected_in_diagnostics():
+    rejected = ControllerResult(
+        setpoints={'131': (0.0, 0.0)},
+        selected_edges=(('131', 'station_0'),),
+        solver_status='optimal_inaccurate',
+        solve_duration_sec=0.125,
+        created_at=10.0,
+    )
+
+    class Publisher:
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, message):
+            self.messages.append(message)
+
+    publisher = Publisher()
+    coordinator = SimpleNamespace(
+        config=SimpleNamespace(
+            controller=SimpleNamespace(algorithm='convex'),
+            safety=SimpleNamespace(dry_run=True),
+        ),
+        armed=False,
+        latest_result=None,
+        latest_rejected_result=rejected,
+        latest_snapshot=None,
+        latest_stop_reason='safety rejected result',
+        latest_handoff='none',
+        aggregator=SimpleNamespace(pose_ages=lambda _now: {}),
+        dispatcher=SimpleNamespace(commanded_robot_ids=(), states={}),
+        diagnostics_publisher=publisher,
+        get_clock=lambda: SimpleNamespace(
+            now=lambda: SimpleNamespace(to_msg=lambda: Time())
+        ),
+    )
+
+    SwarmCoordinator._publish_diagnostics(coordinator)
+
+    values = {
+        item.key: item.value
+        for item in publisher.messages[0].status[0].values
+    }
+    assert values['controller_result_state'] == 'rejected'
+    assert values['solver_status'] == 'optimal_inaccurate'
+    assert values['solve_duration_sec'] == '0.125000'
+    assert values['selected_edges'] == "(('131', 'station_0'),)"
+    assert values['armed'] == 'False'

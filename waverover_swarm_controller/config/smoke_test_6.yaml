@@ -36,7 +36,7 @@ controller:
   distributed_update_semantics: jacobi
 
 waypoint_dispatch:
-  reached_distance_m: 0.15
+  reached_distance_m: 0.05
   handoff_delay_sec: 0.15
   maximum_active_time_sec: 10.0
 

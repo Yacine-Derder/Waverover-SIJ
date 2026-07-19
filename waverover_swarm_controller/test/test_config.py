@@ -24,6 +24,9 @@ def test_calibrated_defaults_and_pc_robot_ids():
     assert config.controller.mpc_max_step_m == pytest.approx(0.333333)
     assert config.controller.minimum_mpc_lookahead_m == pytest.approx(0.30)
     assert config.safety.dry_run
+    assert config.synthetic_mcs.mode == 'static'
+    assert config.recording.profile == 'core'
+    assert config.analysis.connectivity_alpha == pytest.approx(5.0)
 
 
 def test_targets_use_string_ids_and_exactly_one_main():
@@ -37,6 +40,23 @@ def test_targets_use_string_ids_and_exactly_one_main():
         'target_secondary_3',
     ]
     assert sum(target.is_main for target in config.targets) == 1
+
+
+def test_missing_pipeline_sections_keep_backward_compatible_defaults(tmp_path):
+    source = yaml.safe_load(example_path().read_text(encoding='utf-8'))
+    source['targets_file'] = str(Path(__file__).parents[1] / 'config' / 'targets.yaml')
+    source.pop('synthetic_mcs', None)
+    source.pop('recording', None)
+    source.pop('analysis', None)
+    experiment = tmp_path / 'legacy.yaml'
+    experiment.write_text(yaml.safe_dump(source), encoding='utf-8')
+
+    config = load_experiment(experiment)
+
+    assert config.synthetic_mcs.mode == 'static'
+    assert config.synthetic_mcs.seed is None
+    assert config.recording.profile == 'core'
+    assert config.analysis.connectivity_alpha == pytest.approx(5.0)
 
 
 def test_duplicate_target_and_outside_geofence_are_rejected(tmp_path):

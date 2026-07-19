@@ -49,6 +49,45 @@ Distributed MPC defaults to immutable Jacobi updates: every agent sees the
 same previous-cycle predictions. `distributed_update_semantics: gauss_seidel`
 reproduces the simulator's sequential update choice where practical.
 
+### Conservative optimization separation model
+
+All optimization controllers constrain every unordered rover pair at every
+future prediction step, independently of the communication edges. Centralized
+convex and centralized MPC fix a separating-plane normal from the measured
+current positions, `n_ij = (p_i - p_j) / ||p_i - p_j||`, and impose
+`n_ij.T @ (x_i(k) - x_j(k)) >= minimum_separation + 0.001 m`. This is affine
+and therefore remains compatible with CVXPY disciplined convex programming.
+The superficially direct constraint
+`norm(x_i(k) - x_j(k)) >= minimum_separation` is not used: a convex norm on
+the greater-than side makes the feasible set non-convex and violates DCP.
+
+Distributed MPC uses the same fixed current-position directions but divides
+the available projected closing distance equally between both agents. Each
+agent may consume at most
+`(||p_i-p_j|| - minimum_separation - 0.001 m) / 2` toward the other rover at
+each future step. Both agents applying their corresponding half-budget means
+simultaneous motion cannot consume more than the available projected margin.
+Fiedler edges remain communication/connectivity constraints only; collision
+limits cover all rover pairs. Coincident rovers, initially unsafe centralized
+pairs, and negative distributed closing budgets fail explicitly because there
+is no safe direction or margin to infer.
+
+The fixed separating directions are conservative. In particular, longer MPC
+horizons cannot plan a side-switch around another rover even when a nonlinear
+collision-free route exists. First-waypoint connectivity/lookahead
+post-processing is copied into prediction index 1 so safety, visualization,
+and dispatch use the same point; later optimized points are left unchanged,
+which can make the first path segment less representative of the optimizer's
+original dynamics. The independent post-solve safety validator remains
+authoritative and fails closed on any current, immediate, or predicted-path
+violation. Solver metadata from a rejected result may be shown in diagnostics
+as `controller_result_state=rejected`, but that result is never made
+commandable or published as a valid prediction.
+
+These controllers remain first-draft, position-level convex approximations.
+They are not the complete nonlinear fixed-wing formulation described by the
+paper or thesis, and this package does not claim full paper fidelity.
+
 The simulator is the executable baseline. Deliberate hardware-safety fixes are
 documented and tested: coincident/short-distance relay calculations cannot
 divide by zero; zero-adjacency Fiedler selection returns no edges rather than
@@ -119,6 +158,8 @@ sudo apt update
 sudo apt install \
   python3-numpy python3-scipy python3-sklearn python3-networkx \
   python3-cvxpy python3-matplotlib python3-yaml \
+  ros-jazzy-ros2bag ros-jazzy-rosbag2-py \
+  ros-jazzy-rosbag2-storage-default-plugins \
   ros-jazzy-diagnostic-msgs ros-jazzy-geometry-msgs ros-jazzy-nav-msgs \
   ros-jazzy-std-msgs ros-jazzy-std-srvs ros-jazzy-visualization-msgs
 
@@ -178,16 +219,42 @@ separation checks.
 ## Synthetic MCS poses for PC-only tests
 
 `synthetic_mcs` publishes synchronized `PoseStamped` inputs for every rover ID
-in an experiment file. It places multiple rovers at deterministic, equally
-spaced points on a station-centered circle and places a single rover at the
-station. Before creating publishers it validates ID coverage, finite values,
-geofence containment, minimum separation, and communication connectivity to
-the station.
+in an experiment file. Backward-compatible `static` mode places multiple
+rovers at deterministic, equally spaced points on a station-centered circle
+and places a single rover at the station. Dynamic modes integrate only the
+calibrated positive-forward-speed primitives from the experiment: straight,
+bank left, and bank right. The constant-turn-rate equations are integrated at
+the fixed `1/rate_hz` timestep rather than using ROS timer jitter.
+
+Supported modes are:
+
+- `static`: unchanged fixed circular formation.
+- `scripted`: repeat YAML `action`/`duration_sec` segments.
+- `preset`: `circle`, `racetrack`, or `figure_eight` scripts.
+- `random_walk`: seeded random actions and bounded segment durations.
+- `noisy_path`: a seeded script/preset with segment variation, bounded process
+  noise, and separately sampled MCS measurement noise.
+
+Multi-rover motion uses rigid coupling: every rover receives the same
+translation and heading evolution, preserving formation offsets. Every true
+transition and every noisy observation is revalidated for geofence,
+separation, and station/swarm connectivity. Invalid measurement noise is
+resampled; an unsafe true transition or exhausted resampling stops pose
+publication so the coordinator fails stale. Poses are never clamped,
+teleported, reversed, or silently repaired.
 
 This tool publishes **poses only**: it has no waypoint, `end_trial`, `cmd_vel`,
 or wheel-command publisher. It is exclusively for operator-PC development and
 smoke tests. **Never use synthetic MCS as localization during physical rover
 motion.**
+
+In addition to observed MCS poses, it publishes ground truth and realized
+motion on
+`/waverover_swarm/synthetic/ground_truth/waverover_<ID>` and
+`/waverover_swarm/synthetic/motion/waverover_<ID>`. Canonical JSON metadata on
+`/waverover_swarm/synthetic/metadata` records schema version, actual seed,
+fixed timestep, selected/generated segments, noise, and calibration. Metadata
+uses transient-local durability and is periodically republished.
 
 ```bash
 ros2 launch waverover_swarm_controller synthetic_mcs.launch.py \
@@ -201,6 +268,29 @@ ros2 launch waverover_swarm_controller synthetic_mcs.launch.py \
 The launch arguments are `config_file`, `rate_hz`, `radius_m`,
 `angle_offset_rad`, and `yaw_rad`. The node runs in the `/waverover_swarm`
 namespace while its MCS outputs use the canonical absolute fleet topics.
+
+Existing files without `synthetic_mcs` remain static. A dynamic example is:
+
+```yaml
+synthetic_mcs:
+  mode: noisy_path
+  preset: figure_eight
+  seed: 2026                 # null selects OS entropy and logs the actual seed
+  duration_sec: 25.0
+  formation_coupling: rigid
+  segment_duration_min_sec: 1.0
+  segment_duration_max_sec: 5.0
+  process_speed_std_mps: 0.005
+  process_yaw_rate_std_rad_s: 0.01
+  measurement_position_std_m: 0.002
+  measurement_heading_std_rad: 0.005
+```
+
+Identical configuration, seed, initial formation, and rate produce identical
+true and observed samples. A null seed is replaced from operating-system
+entropy for every run. The loader also verifies that
+`turning_path_speed_mps / bank_yaw_rate_rad_s` agrees with `turn_radius_m`
+within five percent.
 
 ## Target YAML visualizer
 
@@ -225,6 +315,113 @@ ros2 run waverover_swarm_controller visualize_targets \
 
 Output formats are selected by a `.png`, `.pdf`, or `.svg` extension. Use
 `--title` to override the plot title.
+
+## Recorded experiments
+
+`run_experiment` is a supervisor separate from the safety-critical
+coordinator. It starts rosbag first, publishes versioned `BEGIN`, launches the
+optional synthetic publisher and coordinator, and records without arming. It
+always resolves the run configuration with `dry_run: true`.
+
+```bash
+ros2 run waverover_swarm_controller run_experiment \
+  --config /home/yacin/waverover/src/waverover_swarm_controller/config/dynamic_smoke_test_6.yaml
+```
+
+The XDG-compatible default root is `~/.local/share/waverover/runs`; override it
+with `recording.root_directory`. Runs are never overwritten:
+
+```text
+runs/2026-07-18/
+  20260718T120000Z_mpc_distributed_synthetic_2026_a1b2c3/
+    manifest.yaml
+    working_tree.patch
+    config/{experiment.yaml,targets.yaml,rosbag_qos_overrides.yaml}
+    bag/recording/
+    logs/
+    analysis/
+```
+
+The manifest is atomically updated through starting, running, and
+completed/interrupted/failed states. It includes configuration copies, actual
+seed, host/runtime/git metadata, exact argument-list child commands, topics,
+storage plugin, exit codes, and failure reason. Dirty worktrees are allowed and
+their patch is saved. Ctrl-C/SIGTERM publishes `STOP_REQUESTED`, stops the
+experiment nodes, publishes `END` while rosbag remains active, flushes rosbag,
+and finalizes the manifest.
+
+`recording.profile: core` records events, synthetic metadata, controller
+telemetry, diagnostics, poses, ground truth/motion, predicted paths, waypoints,
+`cmd_vel`, `end_trial`, TF, parameter events, and ROS logs. `full` additionally
+records IMU, odometry, lidar, and maps. Full-profile lidar and map data can be
+large. Missing topics do not prevent recording and may appear later during a
+physical experiment. SQLite3 is the default storage plugin.
+
+## Machine-readable controller telemetry
+
+Every completed coordinator cycle publishes canonical schema-versioned JSON on
+`/waverover_swarm/controller_telemetry`. It contains measured poses/headings,
+station and targets, setpoints, active/pending waypoints, predicted paths,
+selected edges, explicit target assignments when the algorithm has them,
+solver state/timing, valid/rejected/faulted state, separation pairs/steps,
+binary and weighted connectivity, pose ages/skew, stop reason, and latest
+handoff. Telemetry publication is observability-only: an exception while
+publishing it cannot validate a controller result or enable commands.
+
+## Offline analysis and comparisons
+
+Analyze a run without `ros2 topic echo`:
+
+```bash
+ros2 run waverover_swarm_controller analyze_run <run-directory>
+ros2 run waverover_swarm_controller compare_runs <run-root-or-run> [more-runs...]
+```
+
+The rosbag2 reader selectively deserializes analysis topics and does not load
+lidar/maps. `BEGIN`/`END` define elapsed time when available; bag timestamps are
+an explicitly reported fallback. Outputs are `summary.yaml`, `summary.json`,
+`timeseries.csv`, `events.csv`, `metrics_over_time.png`,
+`metric_distributions.png`, `trajectories.png`, and `report.md`.
+
+The instantaneous mission-cost convention is
+
+```text
+J = sum_(stored undirected edge once) max(ideal_range, edge_distance)
+    + sum_(assigned rover,target) target_weight * target_distance
+```
+
+Stored target assignments produce the exact implemented assignment cost.
+Algorithms without explicit gamma/assignment produce a clearly labeled
+nearest-target proxy, never an “exact paper cost.” Main-target distance reports
+assigned-rover distance and the minimum-any-rover proxy separately. Binary
+`lambda_2` exactly matches the package maximum-range graph. Weighted
+connectivity uses the requested logistic weight with configured alpha (default
+5.0), includes the station, and is zero beyond maximum range. Reports also
+include computation deadlines/statuses, connectivity outages/components,
+separation, graph churn, path length, pose rate, forward-motion fraction,
+tracking error, and explicit nulls/warnings for unavailable quantities.
+
+Comparison recursively discovers completed runs and separates incompatible
+target layouts, communication ranges, rover counts, or scenarios rather than
+silently pooling them. It aggregates means/standard deviations across seeds
+for mission cost, target distance, connectivity, solve time, outages,
+separation, deadline misses, path length, and tracking error.
+
+## Interactive 2D replay
+
+```bash
+ros2 run waverover_swarm_controller replay_run <run-directory>
+ros2 run waverover_swarm_controller replay_run <run-directory> \
+  --no-show --time 10.0 --output analysis/frame_10s.png
+```
+
+Replay renders the arena/geofence, station, weighted targets, oriented rovers,
+recent trails, generated/active/pending points, predicted paths, selected
+edges, the actual range graph with quality colors, optional communication and
+minimum-separation circles, connectivity, solver/stop state, and elapsed and
+remaining time. Controls provide play/pause, seek, step, 0.25x–4x speed, and
+layer toggles. Position is linearly interpolated and heading takes the shortest
+continuous path through ±pi.
 
 ## FIFO-safe dispatch and stopping
 
@@ -289,3 +486,14 @@ Staged multi-rover test:
 4. Compare heuristic variants before enabling convex/MPC solvers; inspect every
    predicted path and solver status. Never progress after a fault without
    identifying its cause and explicitly rearming.
+
+## Experiment-pipeline limitations
+
+Synthetic trajectories are open loop and do not respond to controller
+setpoints or rover commands. Targets are currently static. The controllers are
+position-level approximations, and telemetry/analysis evaluates sampled states
+and prediction steps; discrete separation results do not establish
+continuous-time physical safety between samples. Recorded `cmd_vel`, tracking,
+or delay metrics are unavailable in dry-run when no commands exist and are
+reported as unavailable rather than zero. Neither replay nor offline analysis
+is part of the authoritative online safety decision.

@@ -83,6 +83,43 @@ class SafetyConfig:
 
 
 @dataclass(frozen=True)
+class ManeuverSegment:
+    action: str
+    duration_sec: float
+
+
+@dataclass(frozen=True)
+class SyntheticMcsConfig:
+    mode: str
+    preset: str
+    seed: object
+    duration_sec: float
+    formation_coupling: str
+    segment_duration_min_sec: float
+    segment_duration_max_sec: float
+    process_speed_std_mps: float
+    process_yaw_rate_std_rad_s: float
+    measurement_position_std_m: float
+    measurement_heading_std_rad: float
+    script: tuple
+
+
+@dataclass(frozen=True)
+class RecordingConfig:
+    root_directory: object
+    profile: str
+    storage_id: str
+    pose_source: str
+    start_synthetic: bool
+
+
+@dataclass(frozen=True)
+class AnalysisConfig:
+    connectivity_alpha: float
+    maximum_interpolation_gap_sec: float
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     frame_id: str
     robot_ids: tuple
@@ -95,6 +132,9 @@ class ExperimentConfig:
     waypoint_dispatch: DispatchConfig
     communication: CommunicationConfig
     safety: SafetyConfig
+    synthetic_mcs: SyntheticMcsConfig
+    recording: RecordingConfig
+    analysis: AnalysisConfig
     source_path: Path
     targets_path: Path
 
@@ -202,6 +242,9 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
     dispatch_data = _mapping(data.get('waypoint_dispatch'), 'waypoint_dispatch')
     communication_data = _mapping(data.get('communication'), 'communication')
     safety_data = _mapping(data.get('safety'), 'safety')
+    synthetic_data = _mapping(data.get('synthetic_mcs', {}), 'synthetic_mcs')
+    recording_data = _mapping(data.get('recording', {}), 'recording')
+    analysis_data = _mapping(data.get('analysis', {}), 'analysis')
     geofence_data = _mapping(safety_data.get('geofence'), 'safety.geofence')
     geofence = GeofenceConfig(
         x_min=_finite(geofence_data.get('x_min'), 'safety.geofence.x_min'),
@@ -231,7 +274,7 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
         )
     try:
         horizon = int(controller_data.get('mpc_horizon'))
-        seed = int(controller_data.get('deterministic_seed', 42))
+        controller_seed = int(controller_data.get('deterministic_seed', 42))
     except (TypeError, ValueError) as error:
         raise ConfigError('mpc_horizon and deterministic_seed must be integers.') from error
     if horizon <= 0:
@@ -242,6 +285,99 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
         dry_run = bool(dry_run_override)
     if not isinstance(dry_run, bool):
         raise ConfigError('safety.dry_run must be boolean.')
+
+    synthetic_mode = str(synthetic_data.get('mode', 'static')).strip().lower()
+    if synthetic_mode not in (
+        'static', 'scripted', 'preset', 'random_walk', 'noisy_path'
+    ):
+        raise ConfigError(
+            'synthetic_mcs.mode must be static, scripted, preset, '
+            'random_walk, or noisy_path.'
+        )
+    preset = str(synthetic_data.get('preset', 'figure_eight')).strip().lower()
+    if preset not in ('circle', 'racetrack', 'figure_eight'):
+        raise ConfigError(
+            'synthetic_mcs.preset must be circle, racetrack, or figure_eight.'
+        )
+    seed = synthetic_data.get('seed')
+    if seed is not None:
+        if isinstance(seed, bool):
+            raise ConfigError('synthetic_mcs.seed must be an integer or null.')
+        try:
+            seed = int(seed)
+        except (TypeError, ValueError) as error:
+            raise ConfigError(
+                'synthetic_mcs.seed must be an integer or null.'
+            ) from error
+    formation_coupling = str(
+        synthetic_data.get('formation_coupling', 'rigid')
+    ).strip().lower()
+    if formation_coupling != 'rigid':
+        raise ConfigError(
+            'Only synthetic_mcs.formation_coupling=rigid is currently '
+            'implemented safely.'
+        )
+    actions = {'straight', 'bank_left', 'bank_right'}
+    script = []
+    raw_script = synthetic_data.get('script', [])
+    if not isinstance(raw_script, list):
+        raise ConfigError('synthetic_mcs.script must be a list.')
+    for index, raw_segment in enumerate(raw_script):
+        segment = _mapping(raw_segment, 'synthetic_mcs.script[%d]' % index)
+        action = str(segment.get('action', '')).strip().lower()
+        if action not in actions:
+            raise ConfigError(
+                'synthetic_mcs.script[%d].action must be straight, '
+                'bank_left, or bank_right.' % index
+            )
+        script.append(ManeuverSegment(
+            action=action,
+            duration_sec=_finite(
+                segment.get('duration_sec'),
+                'synthetic_mcs.script[%d].duration_sec' % index,
+                positive=True,
+            ),
+        ))
+    if synthetic_mode == 'scripted' and not script:
+        raise ConfigError('synthetic_mcs.scripted mode requires a script.')
+    segment_min = _finite(
+        synthetic_data.get('segment_duration_min_sec', 1.0),
+        'synthetic_mcs.segment_duration_min_sec',
+        positive=True,
+    )
+    segment_max = _finite(
+        synthetic_data.get('segment_duration_max_sec', 5.0),
+        'synthetic_mcs.segment_duration_max_sec',
+        positive=True,
+    )
+    if segment_min > segment_max:
+        raise ConfigError(
+            'synthetic_mcs segment duration minimum must not exceed maximum.'
+        )
+
+    recording_profile = str(
+        recording_data.get('profile', 'core')
+    ).strip().lower()
+    if recording_profile not in ('core', 'full'):
+        raise ConfigError('recording.profile must be core or full.')
+    storage_id = str(recording_data.get('storage_id', 'sqlite3')).strip()
+    if not storage_id:
+        raise ConfigError('recording.storage_id must be nonempty.')
+    pose_source = str(
+        recording_data.get('pose_source', 'synthetic')
+    ).strip().lower()
+    if pose_source not in ('synthetic', 'mcs'):
+        raise ConfigError('recording.pose_source must be synthetic or mcs.')
+    start_synthetic = recording_data.get('start_synthetic', True)
+    if not isinstance(start_synthetic, bool):
+        raise ConfigError('recording.start_synthetic must be boolean.')
+    root_directory = recording_data.get('root_directory')
+    if root_directory is not None:
+        root_directory = str(root_directory).strip()
+        if not root_directory:
+            raise ConfigError(
+                'recording.root_directory must be nonempty or null.'
+            )
 
     targets_value = str(data.get('targets_file', '')).strip()
     if not targets_value:
@@ -265,6 +401,39 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
     if ideal_range > maximum_range:
         raise ConfigError('ideal_range_m must not exceed maximum_range_m.')
 
+    vehicle = VehicleConfig(
+        straight_speed_mps=_finite(
+            vehicle_data.get('straight_speed_mps'),
+            'vehicle.straight_speed_mps',
+            positive=True,
+        ),
+        turn_radius_m=_finite(
+            vehicle_data.get('turn_radius_m'),
+            'vehicle.turn_radius_m',
+            positive=True,
+        ),
+        bank_yaw_rate_rad_s=_finite(
+            vehicle_data.get('bank_yaw_rate_rad_s'),
+            'vehicle.bank_yaw_rate_rad_s',
+            positive=True,
+        ),
+        turning_path_speed_mps=_finite(
+            vehicle_data.get('turning_path_speed_mps'),
+            'vehicle.turning_path_speed_mps',
+            positive=True,
+        ),
+    )
+    implied_radius = (
+        vehicle.turning_path_speed_mps / vehicle.bank_yaw_rate_rad_s
+    )
+    radius_tolerance = max(1e-4, 0.05 * vehicle.turn_radius_m)
+    if abs(implied_radius - vehicle.turn_radius_m) > radius_tolerance:
+        raise ConfigError(
+            'vehicle turning_path_speed_mps / bank_yaw_rate_rad_s implies '
+            'turn radius %.6f m, inconsistent with turn_radius_m %.6f m.'
+            % (implied_radius, vehicle.turn_radius_m)
+        )
+
     return ExperimentConfig(
         frame_id='robotics_lab',
         robot_ids=robot_ids,
@@ -279,19 +448,14 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
         station=StationState(station_id, *station_position),
         targets=targets,
         main_target_id=main_target_id,
-        vehicle=VehicleConfig(
-            straight_speed_mps=_finite(vehicle_data.get('straight_speed_mps'), 'vehicle.straight_speed_mps', positive=True),
-            turn_radius_m=_finite(vehicle_data.get('turn_radius_m'), 'vehicle.turn_radius_m', positive=True),
-            bank_yaw_rate_rad_s=_finite(vehicle_data.get('bank_yaw_rate_rad_s'), 'vehicle.bank_yaw_rate_rad_s', positive=True),
-            turning_path_speed_mps=_finite(vehicle_data.get('turning_path_speed_mps'), 'vehicle.turning_path_speed_mps', positive=True),
-        ),
+        vehicle=vehicle,
         controller=ControllerConfig(
             algorithm=algorithm,
             control_period_sec=_finite(controller_data.get('control_period_sec'), 'controller.control_period_sec', positive=True),
             mpc_horizon=horizon,
             mpc_max_step_m=_finite(controller_data.get('mpc_max_step_m'), 'controller.mpc_max_step_m', positive=True),
             minimum_mpc_lookahead_m=_finite(controller_data.get('minimum_mpc_lookahead_m'), 'controller.minimum_mpc_lookahead_m', positive=True),
-            deterministic_seed=seed,
+            deterministic_seed=controller_seed,
             distributed_update_semantics=semantics,
         ),
         waypoint_dispatch=DispatchConfig(
@@ -305,6 +469,59 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
             minimum_separation_m=_finite(safety_data.get('minimum_separation_m'), 'safety.minimum_separation_m', positive=True),
             controller_result_timeout_sec=_finite(safety_data.get('controller_result_timeout_sec', 2.5), 'safety.controller_result_timeout_sec', positive=True),
             geofence=geofence,
+        ),
+        synthetic_mcs=SyntheticMcsConfig(
+            mode=synthetic_mode,
+            preset=preset,
+            seed=seed,
+            duration_sec=_finite(
+                synthetic_data.get('duration_sec', 120.0),
+                'synthetic_mcs.duration_sec',
+                positive=True,
+            ),
+            formation_coupling=formation_coupling,
+            segment_duration_min_sec=segment_min,
+            segment_duration_max_sec=segment_max,
+            process_speed_std_mps=_finite(
+                synthetic_data.get('process_speed_std_mps', 0.0),
+                'synthetic_mcs.process_speed_std_mps',
+                nonnegative=True,
+            ),
+            process_yaw_rate_std_rad_s=_finite(
+                synthetic_data.get('process_yaw_rate_std_rad_s', 0.0),
+                'synthetic_mcs.process_yaw_rate_std_rad_s',
+                nonnegative=True,
+            ),
+            measurement_position_std_m=_finite(
+                synthetic_data.get('measurement_position_std_m', 0.0),
+                'synthetic_mcs.measurement_position_std_m',
+                nonnegative=True,
+            ),
+            measurement_heading_std_rad=_finite(
+                synthetic_data.get('measurement_heading_std_rad', 0.0),
+                'synthetic_mcs.measurement_heading_std_rad',
+                nonnegative=True,
+            ),
+            script=tuple(script),
+        ),
+        recording=RecordingConfig(
+            root_directory=root_directory,
+            profile=recording_profile,
+            storage_id=storage_id,
+            pose_source=pose_source,
+            start_synthetic=start_synthetic,
+        ),
+        analysis=AnalysisConfig(
+            connectivity_alpha=_finite(
+                analysis_data.get('connectivity_alpha', 5.0),
+                'analysis.connectivity_alpha',
+                positive=True,
+            ),
+            maximum_interpolation_gap_sec=_finite(
+                analysis_data.get('maximum_interpolation_gap_sec', 0.5),
+                'analysis.maximum_interpolation_gap_sec',
+                positive=True,
+            ),
         ),
         source_path=source_path,
         targets_path=targets_path,

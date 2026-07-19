@@ -68,6 +68,7 @@ class SwarmSnapshot:
 @dataclass(frozen=True)
 class ControllerResult:
     setpoints: Mapping[str, Point2D]
+    target_assignments: Mapping[str, str] = field(default_factory=dict)
     predicted_paths: Mapping[str, Path2D] = field(default_factory=dict)
     selected_edges: Tuple[Edge, ...] = ()
     solver_status: str = 'not_run'
@@ -77,6 +78,14 @@ class ControllerResult:
 
     def __post_init__(self):
         object.__setattr__(self, 'setpoints', _frozen_mapping(self.setpoints))
+        object.__setattr__(
+            self,
+            'target_assignments',
+            _frozen_mapping({
+                str(robot_id): str(target_id)
+                for robot_id, target_id in self.target_assignments.items()
+            }),
+        )
         object.__setattr__(
             self,
             'predicted_paths',

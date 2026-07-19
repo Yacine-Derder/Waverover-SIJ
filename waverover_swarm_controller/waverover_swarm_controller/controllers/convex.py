@@ -6,7 +6,16 @@ import time
 import numpy as np
 
 from ..models import ControllerResult
-from .base import ControllerUnavailableError, SwarmController, optional_dependency
+from .base import (
+    ControllerUnavailableError,
+    SwarmController,
+    optional_dependency,
+    replace_first_future_points,
+)
+from .collision_avoidance import (
+    centralized_separation_constraints,
+    points_satisfy_centralized_planes,
+)
 
 
 def _tree_edges(snapshot):
@@ -99,16 +108,16 @@ class ConvexController(SwarmController):
         import cvxpy as cp
         robot_ids = tuple(sorted(snapshot.robots))
         if snapshot.station is None:
-            return {}, {}, (), 'missing_station'
+            return {}, {}, (), {}, 'missing_station'
         if not robot_ids:
-            return {}, {}, (), 'no_robots'
+            return {}, {}, (), {}, 'no_robots'
         if not snapshot.targets:
             stationary = {
                 robot_id: snapshot.robots[robot_id].position
                 for robot_id in robot_ids
             }
             paths = {robot_id: (point,) for robot_id, point in stationary.items()}
-            return stationary, paths, (), 'no_targets'
+            return stationary, paths, (), {}, 'no_targets'
 
         assignments = self._assign_targets(snapshot)
         edges = _tree_edges(snapshot)
@@ -119,6 +128,15 @@ class ConvexController(SwarmController):
         ])
         positions = cp.Variable((horizon_steps + 1, count, 2))
         constraints = [positions[0] == current]
+        constraints.extend(centralized_separation_constraints(
+            positions,
+            robot_ids,
+            {
+                robot_id: snapshot.robots[robot_id].position
+                for robot_id in robot_ids
+            },
+            self.config.safety.minimum_separation_m,
+        ))
         objective = 0
         maximum_link = self.config.communication.maximum_range_m - (
             2.0 * self.config.vehicle.turn_radius_m
@@ -151,32 +169,55 @@ class ConvexController(SwarmController):
         if problem.status not in ('optimal', 'optimal_inaccurate') or positions.value is None:
             raise RuntimeError('Convex problem status is %s.' % problem.status)
         paths = {
-            robot_id: tuple(
+            robot_id: (
+                snapshot.robots[robot_id].position,
+            ) + tuple(
                 tuple(float(value) for value in positions.value[step, index[robot_id]])
-                for step in range(horizon_steps + 1)
+                for step in range(1, horizon_steps + 1)
             )
             for robot_id in robot_ids
         }
-        setpoints = {robot_id: paths[robot_id][1] for robot_id in robot_ids}
-        setpoints = project_connectivity_safe(
+        optimized_setpoints = {
+            robot_id: paths[robot_id][1] for robot_id in robot_ids
+        }
+        projected_setpoints = project_connectivity_safe(
             snapshot,
-            setpoints,
+            optimized_setpoints,
             edges,
             self.config.communication.maximum_range_m
             - self.config.vehicle.turn_radius_m,
         )
-        return setpoints, paths, edges, problem.status
+        current_positions = {
+            robot_id: snapshot.robots[robot_id].position
+            for robot_id in robot_ids
+        }
+        setpoints = (
+            projected_setpoints
+            if points_satisfy_centralized_planes(
+                current_positions,
+                projected_setpoints,
+                self.config.safety.minimum_separation_m,
+            )
+            else optimized_setpoints
+        )
+        paths = replace_first_future_points(paths, setpoints)
+        target_assignments = {
+            robot_id: target.target_id
+            for robot_id, target in assignments.items()
+        }
+        return setpoints, paths, edges, target_assignments, problem.status
 
     def compute(self, snapshot):
         started = time.monotonic()
         available, reason = self.availability()
         if not available:
             raise ControllerUnavailableError(reason)
-        setpoints, paths, edges, status = self._solve(
+        setpoints, paths, edges, target_assignments, status = self._solve(
             snapshot, self.horizon_steps
         )
         return ControllerResult(
             setpoints=setpoints,
+            target_assignments=target_assignments,
             predicted_paths=paths,
             selected_edges=edges,
             solver_status=status,

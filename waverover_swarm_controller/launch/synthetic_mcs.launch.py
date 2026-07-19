@@ -15,7 +15,8 @@ def generate_launch_description():
     arguments = (
         ('config_file', default_config, str),
         ('rate_hz', '20.0', float),
-        ('radius_m', '0.5', float),
+        # Empty means use synthetic_mcs.initial_radius_m from the YAML.
+        ('radius_m', '', str),
         ('angle_offset_rad', '0.0', float),
         ('yaw_rad', '0.0', float),
     )

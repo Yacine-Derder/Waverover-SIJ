@@ -49,6 +49,8 @@ def compute_analysis(data):
     exact_cost_flags = []
     previous_edges = None
     edge_changes = 0
+    previous_graph_edges = None
+    graph_edge_changes = 0
     for sample in data['telemetry']:
         elapsed = _relative_time(data, sample['_timestamp_sec'])
         has_controller_result = (
@@ -78,6 +80,22 @@ def compute_analysis(data):
         if previous_edges is not None and edges != previous_edges:
             edge_changes += 1
         previous_edges = edges
+        graph_nodes = {
+            robot_id: value['position']
+            for robot_id, value in sample.get('robots', {}).items()
+        }
+        station = sample.get('station')
+        if station:
+            graph_nodes[station['id']] = station['position']
+        graph_edges = tuple(
+            (first, second)
+            for first, second in combinations(sorted(graph_nodes), 2)
+            if math.dist(graph_nodes[first], graph_nodes[second])
+            <= config.communication.maximum_range_m
+        )
+        if previous_graph_edges is not None and graph_edges != previous_graph_edges:
+            graph_edge_changes += 1
+        previous_graph_edges = graph_edges
         rows.append({
             'elapsed_sec': elapsed,
             'result_state': sample.get('result_state'),
@@ -155,6 +173,10 @@ def compute_analysis(data):
     observation_heading_errors = []
     realized_speeds = []
     realized_yaw_rates = []
+    speed_statistics_by_rover = {}
+    yaw_rate_statistics_by_rover = {}
+    measured_speed_statistics_by_rover = {}
+    measured_yaw_rate_statistics_by_rover = {}
     for robot_id in config.robot_ids:
         pose_topic = '/macortex_bridge/waverover_%s/pose' % robot_id
         truth_topic = (
@@ -184,21 +206,33 @@ def compute_analysis(data):
         ]
         realized_speeds.extend(speeds)
         realized_yaw_rates.extend(yaw_rates)
+        speed_statistics_by_rover[robot_id] = descriptive_statistics(speeds)
+        yaw_rate_statistics_by_rover[robot_id] = descriptive_statistics(yaw_rates)
         forward_fractions[robot_id] = (
             sum(speed > 0.0 for speed in speeds) / len(speeds) if speeds else None
         )
+        rover_measured_speeds = []
+        rover_measured_yaw_rates = []
         for first, second in zip(
             pose_paths[robot_id], pose_paths[robot_id][1:]
         ):
             delta_time = second['time_sec'] - first['time_sec']
             if delta_time > 0.0:
-                measured_speeds.append(math.hypot(
+                rover_measured_speeds.append(math.hypot(
                     second['x'] - first['x'], second['y'] - first['y']
                 ) / delta_time)
                 yaw_delta = (
                     second['yaw'] - first['yaw'] + math.pi
                 ) % (2.0 * math.pi) - math.pi
-                measured_yaw_rates.append(yaw_delta / delta_time)
+                rover_measured_yaw_rates.append(yaw_delta / delta_time)
+        measured_speeds.extend(rover_measured_speeds)
+        measured_yaw_rates.extend(rover_measured_yaw_rates)
+        measured_speed_statistics_by_rover[robot_id] = descriptive_statistics(
+            rover_measured_speeds
+        )
+        measured_yaw_rate_statistics_by_rover[robot_id] = descriptive_statistics(
+            rover_measured_yaw_rates
+        )
         for observed, truth in zip(
             pose_paths[robot_id], ground_truth_paths[robot_id]
         ):
@@ -311,6 +345,22 @@ def compute_analysis(data):
             'Configured topics absent from bag metadata: '
             + ', '.join(missing_recorded)
         )
+    synthetic_true_lambda = [
+        value.get('current_true_binary_lambda_2')
+        for value in data['synthetic_metadata']
+    ]
+    synthetic_observed_lambda = [
+        value.get('current_observed_binary_lambda_2')
+        for value in data['synthetic_metadata']
+    ]
+    synthetic_true_weighted = [
+        value.get('current_true_weighted_lambda_2')
+        for value in data['synthetic_metadata']
+    ]
+    synthetic_observed_weighted = [
+        value.get('current_observed_weighted_lambda_2')
+        for value in data['synthetic_metadata']
+    ]
     summary = {
         'schema_version': 1,
         'run_id': data['manifest'].get('run_id'),
@@ -359,6 +409,25 @@ def compute_analysis(data):
             'total_disconnected_duration_sec': sum(outage_durations),
             'longest_outage_sec': max(outage_durations, default=0.0),
             'selected_edge_changes': edge_changes,
+            'communication_graph_changes': graph_edge_changes,
+            'connected_components': descriptive_statistics([
+                row['connected_components'] for row in rows
+            ]),
+            'station_reachable_rovers': descriptive_statistics([
+                row['station_reachable_rovers'] for row in rows
+            ]),
+            'synthetic_true_binary_lambda_2': descriptive_statistics(
+                synthetic_true_lambda
+            ),
+            'synthetic_observed_binary_lambda_2': descriptive_statistics(
+                synthetic_observed_lambda
+            ),
+            'synthetic_true_weighted_lambda_2': descriptive_statistics(
+                synthetic_true_weighted
+            ),
+            'synthetic_observed_weighted_lambda_2': descriptive_statistics(
+                synthetic_observed_weighted
+            ),
         },
         'computation': {
             'duration_sec': descriptive_statistics(solve_values),
@@ -410,6 +479,12 @@ def compute_analysis(data):
             ),
             'realized_forward_speed_mps': descriptive_statistics(realized_speeds),
             'realized_yaw_rate_rad_s': descriptive_statistics(realized_yaw_rates),
+            'forward_speed_mps_by_rover': speed_statistics_by_rover,
+            'yaw_rate_rad_s_by_rover': yaw_rate_statistics_by_rover,
+            'measured_speed_mps_by_rover': measured_speed_statistics_by_rover,
+            'measured_yaw_rate_rad_s_by_rover': (
+                measured_yaw_rate_statistics_by_rover
+            ),
             'primitive_speed_adherence_error_mps': descriptive_statistics(
                 speed_adherence_errors
             ),

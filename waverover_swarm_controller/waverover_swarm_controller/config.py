@@ -95,12 +95,15 @@ class SyntheticMcsConfig:
     seed: object
     duration_sec: float
     formation_coupling: str
+    initial_radius_m: float
+    connectivity_policy: str
     segment_duration_min_sec: float
     segment_duration_max_sec: float
     process_speed_std_mps: float
     process_yaw_rate_std_rad_s: float
     measurement_position_std_m: float
     measurement_heading_std_rad: float
+    maximum_transition_attempts: int
     script: tuple
 
 
@@ -158,6 +161,20 @@ def _finite(value, name, *, positive=False, nonnegative=False):
         raise ConfigError('%s must be positive.' % name)
     if nonnegative and number < 0.0:
         raise ConfigError('%s must be nonnegative.' % name)
+    return number
+
+
+def _positive_integer(value, name):
+    if isinstance(value, bool):
+        raise ConfigError('%s must be an integer.' % name)
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as error:
+        raise ConfigError('%s must be an integer.' % name) from error
+    if isinstance(value, float) and not value.is_integer():
+        raise ConfigError('%s must be an integer.' % name)
+    if number <= 0:
+        raise ConfigError('%s must be positive.' % name)
     return number
 
 
@@ -312,10 +329,16 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
     formation_coupling = str(
         synthetic_data.get('formation_coupling', 'rigid')
     ).strip().lower()
-    if formation_coupling != 'rigid':
+    if formation_coupling not in ('rigid', 'independent'):
         raise ConfigError(
-            'Only synthetic_mcs.formation_coupling=rigid is currently '
-            'implemented safely.'
+            'synthetic_mcs.formation_coupling must be rigid or independent.'
+        )
+    connectivity_policy = str(
+        synthetic_data.get('connectivity_policy', 'enforce')
+    ).strip().lower()
+    if connectivity_policy not in ('enforce', 'observe'):
+        raise ConfigError(
+            'synthetic_mcs.connectivity_policy must be enforce or observe.'
         )
     actions = {'straight', 'bank_left', 'bank_right'}
     script = []
@@ -480,6 +503,12 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
                 positive=True,
             ),
             formation_coupling=formation_coupling,
+            initial_radius_m=_finite(
+                synthetic_data.get('initial_radius_m', 0.5),
+                'synthetic_mcs.initial_radius_m',
+                nonnegative=True,
+            ),
+            connectivity_policy=connectivity_policy,
             segment_duration_min_sec=segment_min,
             segment_duration_max_sec=segment_max,
             process_speed_std_mps=_finite(
@@ -501,6 +530,10 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
                 synthetic_data.get('measurement_heading_std_rad', 0.0),
                 'synthetic_mcs.measurement_heading_std_rad',
                 nonnegative=True,
+            ),
+            maximum_transition_attempts=_positive_integer(
+                synthetic_data.get('maximum_transition_attempts', 50),
+                'synthetic_mcs.maximum_transition_attempts',
             ),
             script=tuple(script),
         ),

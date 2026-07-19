@@ -18,6 +18,7 @@ import time
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import String
 from geometry_msgs.msg import Twist
 from tf2_msgs.msg import TFMessage
@@ -37,6 +38,7 @@ from .experiment_recording import (
     utc_timestamp,
     write_qos_overrides,
 )
+from .synthetic_motion import derive_rover_seed
 
 
 class RunEventPublisher(Node):
@@ -49,6 +51,18 @@ class RunEventPublisher(Node):
         )
         self.publisher = self.create_publisher(
             String, '/waverover_swarm/run_event', qos
+        )
+        self.synthetic_state = None
+        self.synthetic_error = ''
+        self.synthetic_subscription = self.create_subscription(
+            String,
+            '/waverover_swarm/synthetic/metadata',
+            self._synthetic_metadata,
+            QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            ),
         )
         # Advertise command/TF topics without ever publishing. This lets a bag
         # record their schemas and zero message counts in dry-run.
@@ -63,6 +77,14 @@ class RunEventPublisher(Node):
             self.create_publisher(TFMessage, '/tf', 1),
             self.create_publisher(TFMessage, '/tf_static', qos),
         ))
+
+    def _synthetic_metadata(self, message):
+        try:
+            value = json.loads(message.data)
+        except (json.JSONDecodeError, AttributeError):
+            return
+        self.synthetic_state = value.get('state')
+        self.synthetic_error = str(value.get('error', ''))
 
     def publish_event(self, run_id, event, detail=''):
         message = String()
@@ -248,6 +270,17 @@ def main(args=None):
         'pose_source': pose_source,
         'synthetic_mode': config.synthetic_mcs.mode,
         'synthetic_seed': actual_seed,
+        'synthetic_formation_coupling': (
+            config.synthetic_mcs.formation_coupling
+        ),
+        'synthetic_connectivity_policy': (
+            config.synthetic_mcs.connectivity_policy
+        ),
+        'synthetic_initial_radius_m': config.synthetic_mcs.initial_radius_m,
+        'synthetic_derived_rover_seeds': {
+            robot_id: derive_rover_seed(actual_seed, robot_id)
+            for robot_id in sorted(config.robot_ids)
+        },
         'requested_duration_sec': duration,
         'robot_ids': list(config.robot_ids),
         'station': asdict(config.station),
@@ -304,7 +337,7 @@ def main(args=None):
     event_node = None
     failure = ''
     try:
-        rclpy.init()
+        rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
         event_node = RunEventPublisher(config, stack_config)
         bag = _start_child(bag_command, run_directory / 'logs' / 'rosbag.log')
         time.sleep(1.0)
@@ -320,7 +353,12 @@ def main(args=None):
         )
         manifest['state'] = 'running'
         atomic_write_yaml(manifest_path, manifest)
-        deadline = time.monotonic() + duration
+        await_synthetic_completion = (
+            synthetic is not None and arguments.duration_sec is None
+        )
+        deadline = time.monotonic() + duration + (
+            max(15.0, 0.25 * duration) if await_synthetic_completion else 0.0
+        )
         while not stop_requested and time.monotonic() < deadline:
             if bag.poll() is not None:
                 raise RuntimeError('rosbag exited unexpectedly.')
@@ -329,6 +367,23 @@ def main(args=None):
             if synthetic is not None and synthetic.poll() is not None:
                 raise RuntimeError('synthetic_mcs exited unexpectedly.')
             rclpy.spin_once(event_node, timeout_sec=0.1)
+            if event_node.synthetic_state == 'failed':
+                raise RuntimeError(
+                    'synthetic_mcs failed: %s' % event_node.synthetic_error
+                )
+            if (
+                await_synthetic_completion
+                and event_node.synthetic_state == 'completed'
+            ):
+                break
+        if (
+            await_synthetic_completion
+            and not stop_requested
+            and event_node.synthetic_state != 'completed'
+        ):
+            raise RuntimeError(
+                'synthetic_mcs did not complete within the bounded grace period.'
+            )
         event_node.publish_event(run_id, 'STOP_REQUESTED')
     except Exception as error:
         failure = str(error)

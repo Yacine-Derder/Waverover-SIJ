@@ -266,6 +266,11 @@ def test_distributed_mpc_remains_feasible_as_rigid_formation_moves():
         controller=replace(
             dynamic_config.controller, algorithm='mpc_distributed'
         ),
+        synthetic_mcs=replace(
+            dynamic_config.synthetic_mcs,
+            formation_coupling='rigid',
+            connectivity_policy='enforce',
+        ),
     )
     positions = generate_formation(
         config.robot_ids, config.station.position, radius_m=0.5

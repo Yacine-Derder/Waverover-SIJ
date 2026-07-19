@@ -9,6 +9,7 @@ from waverover_swarm_controller.synthetic_mcs import (
     generate_formation,
     validate_formation,
     validated_parameters,
+    resolve_initial_radius,
 )
 
 
@@ -100,3 +101,33 @@ def test_disconnected_formation_is_rejected():
 
     with pytest.raises(ConfigError, match='disconnected'):
         validate_formation(config, positions)
+
+
+def test_observe_policy_accepts_and_reports_disconnected_formation():
+    config = smoke_config()
+    config = replace(
+        config,
+        communication=replace(config.communication, maximum_range_m=0.4),
+        safety=replace(
+            config.safety, geofence=GeofenceConfig(-20.0, 20.0, -20.0, 20.0)
+        ),
+        synthetic_mcs=replace(
+            config.synthetic_mcs, connectivity_policy='observe'
+        ),
+    )
+    positions = generate_formation(config.robot_ids, (0.0, 0.0), 1.0)
+    validation = validate_formation(config, positions)
+    assert validation.disconnected
+    assert validation.binary_lambda_2 == pytest.approx(0.0, abs=1e-12)
+    assert validation.connected_components > 1
+
+
+def test_radius_override_precedence():
+    config = smoke_config()
+    config = replace(
+        config,
+        synthetic_mcs=replace(config.synthetic_mcs, initial_radius_m=1.25),
+    )
+    assert resolve_initial_radius(config, '') == pytest.approx(1.25)
+    assert resolve_initial_radius(config, None) == pytest.approx(1.25)
+    assert resolve_initial_radius(config, '0.75') == pytest.approx(0.75)

@@ -63,12 +63,15 @@ synthetic_mcs:
   seed: null
   duration_sec: 120.0
   formation_coupling: rigid
+  initial_radius_m: 0.5
+  connectivity_policy: enforce
   segment_duration_min_sec: 1.0
   segment_duration_max_sec: 5.0
   process_speed_std_mps: 0.0
   process_yaw_rate_std_rad_s: 0.0
   measurement_position_std_m: 0.0
   measurement_heading_std_rad: 0.0
+  maximum_transition_attempts: 50
 
 recording:
   root_directory: null

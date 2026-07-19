@@ -235,13 +235,26 @@ Supported modes are:
 - `noisy_path`: a seeded script/preset with segment variation, bounded process
   noise, and separately sampled MCS measurement noise.
 
-Multi-rover motion uses rigid coupling: every rover receives the same
-translation and heading evolution, preserving formation offsets. Every true
-transition and every noisy observation is revalidated for geofence,
-separation, and station/swarm connectivity. Invalid measurement noise is
-resampled; an unsafe true transition or exhausted resampling stops pose
-publication so the coordinator fails stale. Poses are never clamped,
-teleported, reversed, or silently repaired.
+`formation_coupling: rigid` (the backward-compatible default) gives every
+rover the same translation and heading evolution, preserving formation
+offsets. `formation_coupling: independent` gives each rover explicit position,
+heading, segment phase, action, speed, yaw rate, history, and RNG state. A
+SHA-256 digest of the actual master seed and complete string rover ID derives
+each stream, so YAML ID ordering does not affect a rover's trajectory.
+
+Every tick is an atomic global candidate: either all rover states pass finite,
+geofence, and minimum-separation checks and commit, or none do. Near another
+rover, a bounded deterministic search tries calibrated positive-speed bank
+alternatives and ranks them using interior clearance and a short constant-bank
+projection. It reserves three turn radii so corrections begin before the hard
+collision boundary. It never stops, reverses, clamps, or teleports a rover.
+Exhausting `maximum_transition_attempts` stops publication and makes the
+coordinator fail stale. Observation resampling never alters true state.
+
+`connectivity_policy: enforce` (the default) also rejects a disconnected true
+or observed station/swarm graph. `observe` permits disconnection while still
+enforcing collision and geofence rules; lambda_2, component count, station
+reachability, outages, and graph churn remain recordable.
 
 This tool publishes **poses only**: it has no waypoint, `end_trial`, `cmd_vel`,
 or wheel-command publisher. It is exclusively for operator-PC development and
@@ -253,21 +266,25 @@ motion on
 `/waverover_swarm/synthetic/ground_truth/waverover_<ID>` and
 `/waverover_swarm/synthetic/motion/waverover_<ID>`. Canonical JSON metadata on
 `/waverover_swarm/synthetic/metadata` records schema version, actual seed,
-fixed timestep, selected/generated segments, noise, and calibration. Metadata
-uses transient-local durability and is periodically republished.
+fixed timestep, actual radius, coupling/policy, per-rover seeds/states/segments,
+true and observed graph/separation metrics, and rejection/correction causes.
+Schema 2 metadata is periodically republished with transient-local durability;
+offline loading remains tolerant of schema 1 bags.
 
 ```bash
 ros2 launch waverover_swarm_controller synthetic_mcs.launch.py \
   config_file:=/home/derder/ros2_ws/src/waverover_swarm_controller/config/smoke_test_6.yaml \
   rate_hz:=20.0 \
-  radius_m:=0.5 \
+  radius_m:=0.75 \
   angle_offset_rad:=0.0 \
   yaw_rad:=0.0
 ```
 
 The launch arguments are `config_file`, `rate_hz`, `radius_m`,
 `angle_offset_rad`, and `yaw_rad`. The node runs in the `/waverover_swarm`
-namespace while its MCS outputs use the canonical absolute fleet topics.
+namespace while its MCS outputs use the canonical absolute fleet topics. Omit
+`radius_m` to use `synthetic_mcs.initial_radius_m`; an explicit launch value
+wins, and old YAML without the field defaults to 0.5 m.
 
 Existing files without `synthetic_mcs` remain static. A dynamic example is:
 
@@ -276,19 +293,22 @@ synthetic_mcs:
   mode: noisy_path
   preset: figure_eight
   seed: 2026                 # null selects OS entropy and logs the actual seed
-  duration_sec: 25.0
-  formation_coupling: rigid
+  duration_sec: 60.0
+  formation_coupling: independent
+  initial_radius_m: 1.0
+  connectivity_policy: observe
   segment_duration_min_sec: 1.0
   segment_duration_max_sec: 5.0
   process_speed_std_mps: 0.005
   process_yaw_rate_std_rad_s: 0.01
   measurement_position_std_m: 0.002
   measurement_heading_std_rad: 0.005
+  maximum_transition_attempts: 50
 ```
 
 Identical configuration, seed, initial formation, and rate produce identical
-true and observed samples. A null seed is replaced from operating-system
-entropy for every run. The loader also verifies that
+per-ID true and observed samples. A null seed is replaced from operating-system
+entropy and the concrete actual seed is recorded. The loader also verifies that
 `turning_path_speed_mps / bank_yaw_rate_rad_s` agrees with `turn_radius_m`
 within five percent.
 
@@ -398,8 +418,18 @@ assigned-rover distance and the minimum-any-rover proxy separately. Binary
 connectivity uses the requested logistic weight with configured alpha (default
 5.0), includes the station, and is zero beyond maximum range. Reports also
 include computation deadlines/statuses, connectivity outages/components,
-separation, graph churn, path length, pose rate, forward-motion fraction,
-tracking error, and explicit nulls/warnings for unavailable quantities.
+station reachability, separation and pairwise-distance distributions, graph
+churn, per-rover and aggregate path length, speed, yaw rate, primitive
+adherence, true/observed pose error, pose rate, tracking error, and explicit
+nulls/warnings for unavailable quantities.
+
+**Interpretation warning:** synthetic trajectories are open loop and ignore
+controller waypoints. Actual/current lambda_2 is therefore exogenous scenario
+data, not closed-loop controller performance. Controllers can produce
+different predicted paths and predicted connectivity, but none can change the
+recorded synthetic positions. These position-level fixed-wing-like primitives
+are useful first-draft stress inputs, not the complete nonlinear aircraft
+formulation from the paper or thesis.
 
 Comparison recursively discovers completed runs and separates incompatible
 target layouts, communication ranges, rover counts, or scenarios rather than
@@ -415,7 +445,8 @@ ros2 run waverover_swarm_controller replay_run <run-directory> \
   --no-show --time 10.0 --output analysis/frame_10s.png
 ```
 
-Replay renders the arena/geofence, station, weighted targets, oriented rovers,
+Replay renders the arena/geofence, station, weighted targets, every rover with
+its own recorded heading,
 recent trails, generated/active/pending points, predicted paths, selected
 edges, the actual range graph with quality colors, optional communication and
 minimum-separation circles, connectivity, solver/stop state, and elapsed and

@@ -17,6 +17,7 @@ from waverover_swarm_controller.synthetic_motion import (
     action_primitive,
     integrate_motion,
     yaw_quaternion,
+    derive_rover_seed,
 )
 
 
@@ -99,10 +100,12 @@ def test_static_mode_preserves_formation_exactly():
     config = load_experiment(config_path())
     positions = generate_formation(config.robot_ids, config.station.position, 0.5)
     trajectory = SyntheticTrajectory(config, positions, 20.0, initial_yaw=0.7)
-    returned, yaw, action, speed, yaw_rate = trajectory.step()
-    assert returned == positions
-    assert yaw == pytest.approx(0.7)
-    assert (action, speed, yaw_rate) == ('static', 0.0, 0.0)
+    result = trajectory.step()
+    assert result.positions == positions
+    assert all(value == pytest.approx(0.7) for value in result.headings.values())
+    assert set(result.actions.values()) == {'static'}
+    assert set(result.speeds.values()) == {0.0}
+    assert set(result.yaw_rates.values()) == {0.0}
 
 
 def test_dynamic_rigid_motion_preserves_separation_and_connectivity():
@@ -111,9 +114,9 @@ def test_dynamic_rigid_motion_preserves_separation_and_connectivity():
     positions = generate_formation(config.robot_ids, config.station.position, 0.5)
     trajectory = SyntheticTrajectory(config, positions, 20.0)
     for _index in range(100):
-        next_positions, _yaw, _action, speed, _yaw_rate = trajectory.step()
-        assert speed > 0.0
-        validation = validate_formation(config, next_positions)
+        result = trajectory.step(lambda values: validate_formation(config, values))
+        assert all(speed > 0.0 for speed in result.speeds.values())
+        validation = validate_formation(config, result.positions)
         assert validation.minimum_separation_m >= 0.35
         assert validation.algebraic_connectivity > 0.0
 
@@ -144,11 +147,13 @@ def test_metadata_contains_seed_noise_calibration_and_segments():
     positions = generate_formation(config.robot_ids, config.station.position, 0.5)
     trajectory = SyntheticTrajectory(config, positions, 20.0)
     metadata = trajectory.metadata()
-    assert metadata['schema_version'] == 1
+    assert metadata['schema_version'] == 2
     assert metadata['actual_seed'] == 2026
     assert metadata['mode'] == 'noisy_path'
     assert metadata['vehicle']['straight_speed_mps'] > 0.0
     assert metadata['generated_segments']
+    assert metadata['derived_rover_seeds']
+    assert metadata['initial_radius_m'] == pytest.approx(0.5)
 
 
 def test_all_pose_messages_in_a_tick_can_share_one_timestamp():
@@ -158,3 +163,130 @@ def test_all_pose_messages_in_a_tick_can_share_one_timestamp():
         for index in range(6)
     ]
     assert all(message.header.stamp == stamp for message in messages)
+
+
+def independent_config(seed=2026):
+    config = load_experiment(
+        Path(__file__).parents[1] / 'config' / 'dynamic_smoke_test_6.yaml'
+    )
+    return replace(
+        config,
+        synthetic_mcs=replace(config.synthetic_mcs, seed=seed),
+    )
+
+
+def test_independent_streams_are_per_id_reproducible_and_order_independent():
+    config = independent_config()
+    positions = generate_formation(config.robot_ids, (0.0, 0.0), 1.0)
+    reordered = dict(reversed(tuple(positions.items())))
+    first = SyntheticTrajectory(config, positions, 20.0)
+    second = SyntheticTrajectory(config, reordered, 20.0)
+    first_values = []
+    second_values = []
+    for _index in range(40):
+        first_values.append(first.step())
+        second_values.append(second.step())
+    assert first_values == second_values
+    assert len(set(first.derived_seeds.values())) == len(config.robot_ids)
+    assert derive_rover_seed(2026, '131') != derive_rover_seed(2026, '132')
+    assert len({
+        tuple(result.positions[robot_id] for result in first_values)
+        for robot_id in config.robot_ids
+    }) == len(config.robot_ids)
+
+
+def test_different_master_seeds_change_independent_trajectories():
+    first_config = independent_config(1)
+    second_config = independent_config(2)
+    positions = generate_formation(first_config.robot_ids, (0.0, 0.0), 1.0)
+    first = SyntheticTrajectory(first_config, positions, 20.0)
+    second = SyntheticTrajectory(second_config, positions, 20.0)
+    assert [first.step() for _ in range(20)] != [second.step() for _ in range(20)]
+
+
+def test_independent_motion_is_finite_forward_atomic_and_safe():
+    config = independent_config()
+    positions = generate_formation(config.robot_ids, (0.0, 0.0), 1.0)
+    trajectory = SyntheticTrajectory(config, positions, 20.0)
+    pair_distances = []
+    lambda_values = []
+    previous_positions = dict(positions)
+    for _index in range(250):
+        result = trajectory.step(
+            lambda values: validate_formation(config, values)
+        )
+        validation = trajectory.last_true_validation
+        assert validation.minimum_separation_m >= 0.35
+        assert all(config.safety.geofence.contains(point)
+                   for point in result.positions.values())
+        assert all(math.isfinite(value) for state in trajectory.states.values()
+                   for value in (state.x, state.y, state.yaw,
+                                 state.last_speed_mps, state.last_yaw_rate_rad_s))
+        assert all(speed > 0.0 for speed in result.speeds.values())
+        assert set(result.actions.values()) <= {
+            'straight', 'bank_left', 'bank_right'
+        }
+        maximum_step = (
+            max(config.vehicle.straight_speed_mps,
+                config.vehicle.turning_path_speed_mps)
+            + 3.0 * config.synthetic_mcs.process_speed_std_mps
+        ) * trajectory.timestep
+        assert all(
+            math.dist(previous_positions[robot_id], point)
+            <= maximum_step + 1e-9
+            for robot_id, point in result.positions.items()
+        )
+        for robot_id, action in result.actions.items():
+            if action == 'straight':
+                assert abs(result.yaw_rates[robot_id]) <= (
+                    3.0 * config.synthetic_mcs.process_yaw_rate_std_rad_s
+                    + 1e-12
+                )
+            else:
+                radius = abs(
+                    result.speeds[robot_id] / result.yaw_rates[robot_id]
+                )
+                assert radius == pytest.approx(
+                    config.vehicle.turn_radius_m, abs=0.01
+                )
+        previous_positions = dict(result.positions)
+        pair_distances.append(validation.minimum_separation_m)
+        lambda_values.append(validation.binary_lambda_2)
+    assert max(pair_distances) - min(pair_distances) > 0.01
+    assert max(lambda_values) - min(lambda_values) > 0.01
+    assert len(set(result.headings.values())) > 1
+    assert len(set(result.speeds.values())) > 1
+    assert trajectory.corrective_interventions > 0
+
+
+def test_unsafe_transition_does_not_partially_commit_and_retries_fail_closed():
+    config = independent_config()
+    config = replace(
+        config,
+        synthetic_mcs=replace(
+            config.synthetic_mcs, maximum_transition_attempts=3
+        ),
+    )
+    positions = generate_formation(config.robot_ids, (0.0, 0.0), 1.0)
+    trajectory = SyntheticTrajectory(config, positions, 20.0)
+    before = trajectory.states
+    with pytest.raises(ValueError, match='after 3 attempts'):
+        trajectory.step(lambda _values: (_ for _ in ()).throw(
+            ValueError('forced unsafe candidate')
+        ))
+    assert trajectory.states == before
+    assert trajectory.elapsed == 0.0
+
+
+def test_measurement_rejection_never_changes_true_state():
+    config = independent_config()
+    positions = generate_formation(config.robot_ids, (0.0, 0.0), 1.0)
+    trajectory = SyntheticTrajectory(config, positions, 20.0)
+    trajectory.step(lambda values: validate_formation(config, values))
+    before = trajectory.states
+    with pytest.raises(ValueError, match='observation'):
+        trajectory.observed_formation(
+            lambda _values: (_ for _ in ()).throw(ValueError('reject noise')),
+            maximum_attempts=2,
+        )
+    assert trajectory.states == before

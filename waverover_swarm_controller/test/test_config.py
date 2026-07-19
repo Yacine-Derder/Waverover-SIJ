@@ -25,6 +25,9 @@ def test_calibrated_defaults_and_pc_robot_ids():
     assert config.controller.minimum_mpc_lookahead_m == pytest.approx(0.30)
     assert config.safety.dry_run
     assert config.synthetic_mcs.mode == 'static'
+    assert config.synthetic_mcs.formation_coupling == 'rigid'
+    assert config.synthetic_mcs.connectivity_policy == 'enforce'
+    assert config.synthetic_mcs.initial_radius_m == pytest.approx(0.5)
     assert config.recording.profile == 'core'
     assert config.analysis.connectivity_alpha == pytest.approx(5.0)
 
@@ -55,6 +58,9 @@ def test_missing_pipeline_sections_keep_backward_compatible_defaults(tmp_path):
 
     assert config.synthetic_mcs.mode == 'static'
     assert config.synthetic_mcs.seed is None
+    assert config.synthetic_mcs.formation_coupling == 'rigid'
+    assert config.synthetic_mcs.connectivity_policy == 'enforce'
+    assert config.synthetic_mcs.initial_radius_m == pytest.approx(0.5)
     assert config.recording.profile == 'core'
     assert config.analysis.connectivity_alpha == pytest.approx(5.0)
 
@@ -83,3 +89,52 @@ def test_duplicate_target_and_outside_geofence_are_rejected(tmp_path):
 def test_unknown_algorithm_never_silently_falls_back(algorithm):
     with pytest.raises(ConfigError, match='algorithm'):
         load_experiment(example_path(), algorithm_override=algorithm)
+
+
+@pytest.mark.parametrize('coupling', ['rigid', 'independent'])
+@pytest.mark.parametrize('policy', ['enforce', 'observe'])
+def test_synthetic_coupling_and_connectivity_policy_are_accepted(
+    tmp_path, coupling, policy
+):
+    source = yaml.safe_load(example_path().read_text(encoding='utf-8'))
+    source['targets_file'] = str(
+        Path(__file__).parents[1] / 'config' / 'targets.yaml'
+    )
+    source['synthetic_mcs'].update({
+        'formation_coupling': coupling,
+        'connectivity_policy': policy,
+        'initial_radius_m': 1.25,
+        'maximum_transition_attempts': 7,
+    })
+    path = tmp_path / ('%s-%s.yaml' % (coupling, policy))
+    path.write_text(yaml.safe_dump(source), encoding='utf-8')
+    config = load_experiment(path)
+    assert config.synthetic_mcs.formation_coupling == coupling
+    assert config.synthetic_mcs.connectivity_policy == policy
+    assert config.synthetic_mcs.initial_radius_m == pytest.approx(1.25)
+    assert config.synthetic_mcs.maximum_transition_attempts == 7
+
+
+@pytest.mark.parametrize(
+    'field,value,pattern',
+    [
+        ('formation_coupling', 'elastic', 'formation_coupling'),
+        ('connectivity_policy', 'ignore', 'connectivity_policy'),
+        ('initial_radius_m', -1.0, 'initial_radius_m'),
+        ('initial_radius_m', float('nan'), 'initial_radius_m'),
+        ('maximum_transition_attempts', 0, 'maximum_transition_attempts'),
+        ('maximum_transition_attempts', 1.5, 'maximum_transition_attempts'),
+    ],
+)
+def test_invalid_synthetic_transition_configuration_is_rejected(
+    tmp_path, field, value, pattern
+):
+    source = yaml.safe_load(example_path().read_text(encoding='utf-8'))
+    source['targets_file'] = str(
+        Path(__file__).parents[1] / 'config' / 'targets.yaml'
+    )
+    source['synthetic_mcs'][field] = value
+    path = tmp_path / 'invalid.yaml'
+    path.write_text(yaml.safe_dump(source), encoding='utf-8')
+    with pytest.raises(ConfigError, match=pattern):
+        load_experiment(path)

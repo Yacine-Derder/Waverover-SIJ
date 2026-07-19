@@ -20,14 +20,29 @@ from std_msgs.msg import String
 from waverover.stack_config import load_stack_config, mcs_pose_topic
 
 from .config import ConfigError, load_experiment
-from .metrics import algebraic_connectivity, minimum_pairwise_distance
+from .metrics import (
+    algebraic_connectivity,
+    connected_components,
+    minimum_pairwise_with_ids,
+    weighted_algebraic_connectivity,
+)
 from .synthetic_motion import SyntheticTrajectory, yaw_quaternion
 
 
 @dataclass(frozen=True)
 class FormationValidation:
     minimum_separation_m: float
-    algebraic_connectivity: float
+    minimum_separation_pair: object
+    binary_lambda_2: float
+    weighted_lambda_2: float
+    connected_components: int
+    station_reachable_rovers: int
+    disconnected: bool
+
+    @property
+    def algebraic_connectivity(self):
+        """Backward-compatible name used by existing callers."""
+        return self.binary_lambda_2
 
 
 def validated_parameters(rate_hz, radius_m, angle_offset_rad, yaw_rad):
@@ -54,6 +69,19 @@ def validated_parameters(rate_hz, radius_m, angle_offset_rad, yaw_rad):
     if radius < 0.0:
         raise ConfigError('radius_m must be nonnegative.')
     return rate, radius, offset, yaw
+
+
+def resolve_initial_radius(config, radius_override=''):
+    """Apply CLI override, YAML value, then legacy 0.5 m precedence."""
+    if radius_override is None or str(radius_override).strip() == '':
+        return float(getattr(config.synthetic_mcs, 'initial_radius_m', 0.5))
+    try:
+        radius = float(radius_override)
+    except (TypeError, ValueError) as error:
+        raise ConfigError('radius_m must be numeric or empty.') from error
+    if not math.isfinite(radius) or radius < 0.0:
+        raise ConfigError('radius_m must be finite and nonnegative.')
+    return radius
 
 
 def generate_formation(robot_ids, station_position, radius_m, angle_offset_rad=0.0):
@@ -92,7 +120,7 @@ def _is_connected(node_positions, maximum_range_m):
     return len(visited) == len(node_ids)
 
 
-def validate_formation(config, positions):
+def validate_formation(config, positions, connectivity_policy=None):
     """Reject unsafe or configuration-inconsistent synthetic formations."""
     expected = set(config.robot_ids)
     received = set(positions)
@@ -106,14 +134,20 @@ def validate_formation(config, positions):
             raise ConfigError('Formation position for %s must be finite.' % robot_id)
         if not config.safety.geofence.contains(point):
             raise ConfigError('Formation position for %s is outside the geofence.' % robot_id)
-    separation = minimum_pairwise_distance(positions.values())
+    separation, first, second = minimum_pairwise_with_ids(positions)
     if separation < config.safety.minimum_separation_m:
         raise ConfigError(
-            'Formation minimum separation %.3f m is below %.3f m.'
-            % (separation, config.safety.minimum_separation_m)
+            'Formation minimum separation between %s and %s is %.3f m, '
+            'below %.3f m.'
+            % (first, second, separation, config.safety.minimum_separation_m)
         )
     nodes = {config.station.station_id: config.station.position, **positions}
-    if not _is_connected(nodes, config.communication.maximum_range_m):
+    components = connected_components(
+        nodes, config.communication.maximum_range_m
+    )
+    disconnected = len(components) > 1
+    policy = connectivity_policy or config.synthetic_mcs.connectivity_policy
+    if policy == 'enforce' and disconnected:
         raise ConfigError(
             'Formation graph including station is disconnected at %.3f m.'
             % config.communication.maximum_range_m
@@ -121,7 +155,25 @@ def validate_formation(config, positions):
     connectivity = algebraic_connectivity(
         nodes, config.communication.maximum_range_m
     )
-    return FormationValidation(separation, connectivity)
+    weighted = weighted_algebraic_connectivity(
+        nodes,
+        config.communication.ideal_range_m,
+        config.communication.maximum_range_m,
+        config.analysis.connectivity_alpha,
+    )
+    station_component = next((
+        component for component in components
+        if config.station.station_id in component
+    ), ())
+    return FormationValidation(
+        separation,
+        [first, second] if first is not None else None,
+        connectivity,
+        weighted,
+        len(components),
+        max(0, len(station_component) - 1),
+        disconnected,
+    )
 
 
 class SyntheticMCS(Node):
@@ -131,7 +183,7 @@ class SyntheticMCS(Node):
         super().__init__('synthetic_mcs')
         config_file = str(self.declare_parameter('config_file', '').value).strip()
         rate_hz = self.declare_parameter('rate_hz', 20.0).value
-        radius_m = self.declare_parameter('radius_m', 0.5).value
+        radius_override = self.declare_parameter('radius_m', '').value
         angle_offset = self.declare_parameter('angle_offset_rad', 0.0).value
         yaw_rad = self.declare_parameter('yaw_rad', 0.0).value
         seed_override = str(
@@ -139,10 +191,11 @@ class SyntheticMCS(Node):
         ).strip()
         if not config_file:
             raise ConfigError('config_file is required.')
+        self.config = load_experiment(config_file)
+        radius_m = resolve_initial_radius(self.config, radius_override)
         rate_hz, radius_m, angle_offset, yaw_rad = validated_parameters(
             rate_hz, radius_m, angle_offset, yaw_rad
         )
-        self.config = load_experiment(config_file)
         stack_config = load_stack_config(require_identity=False)
         initial_positions = generate_formation(
             self.config.robot_ids,
@@ -161,7 +214,9 @@ class SyntheticMCS(Node):
             rate_hz,
             initial_yaw=yaw_rad,
             seed=selected_seed,
+            initial_radius_m=radius_m,
         )
+        self.trajectory.last_true_validation = validation
         self.positions = dict(initial_positions)
         self._publish_count = 0
         self._failed = False
@@ -279,22 +334,23 @@ class SyntheticMCS(Node):
             return
         previous_segment_count = len(self.trajectory.generated_segments)
         try:
-            positions, yaw, action, speed, yaw_rate = self.trajectory.step()
-            validate_formation(self.config, positions)
+            result = self.trajectory.step(
+                lambda values: validate_formation(self.config, values)
+            )
             observed, observed_headings = self.trajectory.observed_formation(
                 lambda values: validate_formation(self.config, values)
             )
         except (ConfigError, ValueError) as error:
             self._fail_closed(error)
             return
-        self.positions = dict(positions)
+        self.positions = dict(result.positions)
         stamp = self.get_clock().now().to_msg()
         for robot_id in sorted(self.positions):
             self.ground_truth_publishers[robot_id].publish(self._pose_message(
                 stamp,
                 self.config.frame_id,
                 self.positions[robot_id],
-                yaw,
+                result.headings[robot_id],
             ))
             self.publishers_by_id[robot_id].publish(self._pose_message(
                 stamp,
@@ -305,8 +361,8 @@ class SyntheticMCS(Node):
             motion = TwistStamped()
             motion.header.stamp = stamp
             motion.header.frame_id = self.config.frame_id
-            motion.twist.linear.x = speed
-            motion.twist.angular.z = yaw_rate
+            motion.twist.linear.x = result.speeds[robot_id]
+            motion.twist.angular.z = result.yaw_rates[robot_id]
             self.motion_publishers[robot_id].publish(motion)
         self._publish_count += 1
         if (

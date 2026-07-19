@@ -92,6 +92,7 @@ class DecentralizedHeuristicController(HeuristicController):
             )
         return ControllerResult(
             setpoints=setpoints,
+            target_assignments=self._agent_targets,
             selected_edges=self._selected_edges(snapshot, setpoints),
             solver_status='decentralized_local_agents',
             solve_duration_sec=time.monotonic() - started,

@@ -55,6 +55,17 @@ def minimum_lookahead(robot, point, minimum_distance, maximum_step):
     return (robot.x + scale * dx, robot.y + scale * dy)
 
 
+def replace_first_future_points(predicted_paths, setpoints):
+    """Return paths whose first future point is exactly the dispatched point."""
+    output = {}
+    for robot_id, path in predicted_paths.items():
+        points = list(path)
+        if len(points) >= 2 and robot_id in setpoints:
+            points[1] = tuple(float(value) for value in setpoints[robot_id])
+        output[robot_id] = tuple(points)
+    return output
+
+
 def controller_from_config(config):
     algorithm = config.controller.algorithm
     if algorithm == 'heuristic':

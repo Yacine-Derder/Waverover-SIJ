@@ -11,6 +11,11 @@ from .base import (
     SwarmController,
     minimum_lookahead,
     optional_dependency,
+    replace_first_future_points,
+)
+from .collision_avoidance import (
+    distributed_closing_limits,
+    points_satisfy_distributed_limits,
 )
 
 
@@ -77,7 +82,34 @@ class DistributedMpcController(SwarmController):
             ),
         )
 
-    def _solve_agent(self, robot_id, snapshot, edges, neighbor_predictions):
+    @staticmethod
+    def _prediction_at_current(previous, current, horizon):
+        """Translate a prior trajectory to the newly measured current pose."""
+        if not previous:
+            return tuple(current for _ in range(horizon + 1))
+        offset = (
+            float(current[0]) - float(previous[0][0]),
+            float(current[1]) - float(previous[0][1]),
+        )
+        translated = tuple(
+            (
+                float(point[0]) + offset[0],
+                float(point[1]) + offset[1],
+            )
+            for point in previous
+        )
+        if len(translated) < horizon + 1:
+            translated += (translated[-1],) * (horizon + 1 - len(translated))
+        return (tuple(current),) + translated[1:horizon + 1]
+
+    def _solve_agent(
+        self,
+        robot_id,
+        snapshot,
+        edges,
+        neighbor_predictions,
+        closing_limits,
+    ):
         import cvxpy as cp
         robot = snapshot.robots[robot_id]
         horizon = self.config.controller.mpc_horizon
@@ -102,6 +134,13 @@ class DistributedMpcController(SwarmController):
             objective += target.weight * cp.norm(
                 path[step] - np.asarray(target.position)
             )
+            for _neighbor_id, normal, closing_budget in closing_limits[robot_id]:
+                displacement = path[step] - np.asarray(robot.position)
+                constraints.append(
+                    normal[0] * displacement[0]
+                    + normal[1] * displacement[1]
+                    >= -closing_budget
+                )
             for neighbor_id in connected_neighbors:
                 if neighbor_id == snapshot.station.station_id:
                     neighbor_position = np.asarray(snapshot.station.position)
@@ -129,9 +168,9 @@ class DistributedMpcController(SwarmController):
             raise RuntimeError(
                 'Distributed agent %s status is %s.' % (robot_id, problem.status)
             )
-        return tuple(
+        return (robot.position,) + tuple(
             tuple(float(value) for value in path.value[step])
-            for step in range(horizon + 1)
+            for step in range(1, horizon + 1)
         ), problem.status
 
     def compute(self, snapshot):
@@ -173,30 +212,59 @@ class DistributedMpcController(SwarmController):
         edges = select_fiedler_edges(
             snapshot, self.config.communication.maximum_range_m
         )
+        current_positions = {
+            robot_id: snapshot.robots[robot_id].position
+            for robot_id in robot_ids
+        }
+        closing_limits = distributed_closing_limits(
+            current_positions,
+            self.config.safety.minimum_separation_m,
+        )
         cycle_predictions = {
-            robot_id: self._previous_predictions.get(
-                robot_id,
-                tuple(
-                    snapshot.robots[robot_id].position
-                    for _ in range(self.config.controller.mpc_horizon + 1)
-                ),
+            robot_id: self._prediction_at_current(
+                self._previous_predictions.get(robot_id),
+                snapshot.robots[robot_id].position,
+                self.config.controller.mpc_horizon,
             )
             for robot_id in robot_ids
         }
         solved = {}
         statuses = []
+        connectivity_retries = 0
         for robot_id in robot_ids:
             visible = (
                 cycle_predictions
                 if self.config.controller.distributed_update_semantics == 'jacobi'
                 else {**cycle_predictions, **solved}
             )
-            solved[robot_id], status = self._solve_agent(
-                robot_id, snapshot, edges, visible
-            )
+            try:
+                solved[robot_id], status = self._solve_agent(
+                    robot_id, snapshot, edges, visible, closing_limits
+                )
+            except RuntimeError as error:
+                if 'status is infeasible' not in str(error):
+                    raise
+                # A changed Fiedler graph can make shifted prior trajectories
+                # mutually inconsistent. Retry the same local problem against
+                # current stationary neighbor references; collision budgets
+                # remain unchanged and authoritative.
+                stationary_neighbors = {
+                    neighbor_id: tuple(
+                        snapshot.robots[neighbor_id].position
+                        for _ in range(self.config.controller.mpc_horizon + 1)
+                    )
+                    for neighbor_id in robot_ids
+                }
+                solved[robot_id], status = self._solve_agent(
+                    robot_id,
+                    snapshot,
+                    edges,
+                    stationary_neighbors,
+                    closing_limits,
+                )
+                connectivity_retries += 1
             statuses.append(status)
-        self._previous_predictions = solved
-        setpoints = {
+        lookahead_setpoints = {
             robot_id: minimum_lookahead(
                 snapshot.robots[robot_id],
                 solved[robot_id][1],
@@ -205,15 +273,36 @@ class DistributedMpcController(SwarmController):
             )
             for robot_id in robot_ids
         }
+        setpoints = (
+            lookahead_setpoints
+            if points_satisfy_distributed_limits(
+                current_positions,
+                lookahead_setpoints,
+                closing_limits,
+            )
+            else {robot_id: solved[robot_id][1] for robot_id in robot_ids}
+        )
+        predicted_paths = replace_first_future_points(solved, setpoints)
+        self._previous_predictions = predicted_paths
         return ControllerResult(
             setpoints=setpoints,
-            predicted_paths=solved,
+            target_assignments={
+                robot_id: self._target_for(
+                    snapshot.robots[robot_id], snapshot
+                ).target_id
+                for robot_id in robot_ids
+            },
+            predicted_paths=predicted_paths,
             selected_edges=edges,
             solver_status='+'.join(sorted(set(statuses))),
             solve_duration_sec=time.monotonic() - started,
             diagnostic=(
-                'Fiedler edges; locally executed %s per-agent updates.'
-                % self.config.controller.distributed_update_semantics
+                'Fiedler edges; locally executed %s per-agent updates; '
+                'stationary-connectivity retries=%d.'
+                % (
+                    self.config.controller.distributed_update_semantics,
+                    connectivity_retries,
+                )
             ),
             created_at=time.monotonic(),
         )

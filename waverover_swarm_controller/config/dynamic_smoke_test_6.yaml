@@ -1,14 +1,8 @@
-# PC-only example. Communication ranges, geofence, and target coordinates must
-# be verified in robotics_lab before any physical experiment.
+# PC-only reproducible dynamic recording example. Never use as localization
+# during physical rover motion.
 frame_id: robotics_lab
 
-robot_ids:
-  - "131"
-  - "132"
-  - "133"
-  - "134"
-  - "135"
-  - "136"
+robot_ids: ["131", "132", "133", "134", "135", "136"]
 
 pose:
   timeout_sec: 0.5
@@ -18,7 +12,7 @@ station:
   id: station_0
   position: [0.0, 0.0]
 
-targets_file: targets.yaml
+targets_file: targets_smoke_6.yaml
 
 vehicle:
   straight_speed_mps: 0.333333
@@ -27,7 +21,7 @@ vehicle:
   turning_path_speed_mps: 0.376991
 
 controller:
-  algorithm: heuristic
+  algorithm: mpc_distributed
   control_period_sec: 1.0
   mpc_horizon: 5
   mpc_max_step_m: 0.333333
@@ -36,12 +30,11 @@ controller:
   distributed_update_semantics: jacobi
 
 waypoint_dispatch:
-  reached_distance_m: 0.15
+  reached_distance_m: 0.05
   handoff_delay_sec: 0.15
   maximum_active_time_sec: 10.0
 
 communication:
-  # Illustrative laboratory defaults; verify against measured radio behavior.
   ideal_range_m: 1.5
   maximum_range_m: 2.0
 
@@ -49,26 +42,20 @@ safety:
   dry_run: true
   minimum_separation_m: 0.35
   controller_result_timeout_sec: 2.5
-  geofence:
-    # Illustrative laboratory bounds; verify against the available floor area.
-    x_min: -4.0
-    x_max: 4.0
-    y_min: -4.0
-    y_max: 4.0
+  geofence: {x_min: -4.0, x_max: 4.0, y_min: -4.0, y_max: 4.0}
 
-# Omit this section to retain the same static circular synthetic formation.
 synthetic_mcs:
-  mode: static
+  mode: noisy_path
   preset: figure_eight
-  seed: null
-  duration_sec: 120.0
+  seed: 2026
+  duration_sec: 25.0
   formation_coupling: rigid
   segment_duration_min_sec: 1.0
   segment_duration_max_sec: 5.0
-  process_speed_std_mps: 0.0
-  process_yaw_rate_std_rad_s: 0.0
-  measurement_position_std_m: 0.0
-  measurement_heading_std_rad: 0.0
+  process_speed_std_mps: 0.005
+  process_yaw_rate_std_rad_s: 0.01
+  measurement_position_std_m: 0.002
+  measurement_heading_std_rad: 0.005
 
 recording:
   root_directory: null

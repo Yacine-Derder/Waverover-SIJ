@@ -32,6 +32,14 @@ setup(
             'waverover_swarm_controller.synthetic_mcs:main',
             'visualize_targets = '
             'waverover_swarm_controller.target_visualizer:main',
+            'run_experiment = '
+            'waverover_swarm_controller.run_experiment:main',
+            'analyze_run = '
+            'waverover_swarm_controller.analyze_run:main',
+            'compare_runs = '
+            'waverover_swarm_controller.compare_runs:main',
+            'replay_run = '
+            'waverover_swarm_controller.replay_run:main',
         ],
     },
 )

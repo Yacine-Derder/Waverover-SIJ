@@ -1,4 +1,4 @@
-# PC-only reproducible random-motion recording test: centralized convex.
+# PC-only reproducible random-motion recording test: centralized heuristic.
 frame_id: robotics_lab
 
 robot_ids: ["131", "132", "133", "134"]
@@ -20,7 +20,7 @@ vehicle:
   turning_path_speed_mps: 0.376991
 
 controller:
-  algorithm: convex
+  algorithm: mpc_centralized
   control_period_sec: 1.0
   mpc_horizon: 5
   mpc_max_step_m: 0.333333
@@ -39,8 +39,8 @@ communication:
   maximum_range_m: 2.0
 
 safety:
-  dry_run: true
-  minimum_separation_m: 0.35
+  dry_run: False
+  minimum_separation_m: 0.20
   controller_result_timeout_sec: 2.5
   geofence: {x_min: -4.0, x_max: 4.0, y_min: -4.0, y_max: 4.0}
 
@@ -63,8 +63,8 @@ recording:
   root_directory: /home/derder/waverover_runs
   profile: core
   storage_id: sqlite3
-  pose_source: synthetic
-  start_synthetic: true
+  pose_source: mcs
+  start_synthetic: False
 
 analysis:
   connectivity_alpha: 5.0

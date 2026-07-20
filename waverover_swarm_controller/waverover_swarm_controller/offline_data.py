@@ -57,6 +57,7 @@ def load_run_data(run_directory):
         '/waverover_swarm/controller_telemetry',
         '/waverover_swarm/synthetic/metadata',
         '/waverover_swarm/run_event',
+        '/waverover_swarm/target_state',
     }
     for robot_id in config.robot_ids:
         interesting.update({
@@ -64,6 +65,7 @@ def load_run_data(run_directory):
             '/waverover_swarm/synthetic/ground_truth/waverover_%s' % robot_id,
             '/waverover_swarm/synthetic/motion/waverover_%s' % robot_id,
             '/waverover_%s/waypoints' % robot_id,
+            '/waverover_%s/waypoint_reached' % robot_id,
             '/waverover_%s/cmd_vel' % robot_id,
         })
     message_types = {
@@ -81,9 +83,15 @@ def load_run_data(run_directory):
         if topic not in message_types:
             continue
         message = deserialize_message(serialized, message_types[topic])
+        timestamp_sec = (
+            float(timestamp_ns) * 1e-9
+            if topic.endswith('/waypoints')
+            or topic.endswith('/waypoint_reached')
+            else message_timestamp_sec(message, timestamp_ns)
+        )
         samples[topic].append({
             'bag_timestamp_sec': float(timestamp_ns) * 1e-9,
-            'timestamp_sec': message_timestamp_sec(message, timestamp_ns),
+            'timestamp_sec': timestamp_sec,
             'message': message,
         })
     telemetry = []
@@ -110,6 +118,29 @@ def load_run_data(run_directory):
             continue
         value['_timestamp_sec'] = sample['timestamp_sec']
         metadata.append(value)
+    target_states = []
+    for sample in samples['/waverover_swarm/target_state']:
+        try:
+            value = json.loads(sample['message'].data)
+        except (json.JSONDecodeError, AttributeError):
+            continue
+        value['_timestamp_sec'] = sample['timestamp_sec']
+        target_states.append(value)
+    acknowledgements = [
+        {
+            'robot_id': topic.split('/')[1].removeprefix('waverover_'),
+            'timestamp_sec': sample['timestamp_sec'],
+            'frame_id': sample['message'].header.frame_id,
+            'token': [
+                sample['message'].header.stamp.sec,
+                sample['message'].header.stamp.nanosec,
+            ],
+            'point': [sample['message'].point.x, sample['message'].point.y],
+        }
+        for topic, topic_samples in samples.items()
+        if topic.endswith('/waypoint_reached')
+        for sample in topic_samples
+    ]
     start_candidates = [
         event['_timestamp_sec'] for event in events
         if event.get('event') == 'BEGIN'
@@ -136,6 +167,8 @@ def load_run_data(run_directory):
         'telemetry': telemetry,
         'events': events,
         'synthetic_metadata': metadata,
+        'target_states': target_states,
+        'acknowledgement_events': acknowledgements,
         'start_time': start_time,
         'end_time': end_time,
         'used_run_events': bool(start_candidates and end_candidates),

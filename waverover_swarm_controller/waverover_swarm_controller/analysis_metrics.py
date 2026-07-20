@@ -82,29 +82,37 @@ def mission_cost(sample, ideal_range):
     return communication, target_cost, communication + target_cost, exact
 
 
-def main_target_distances(sample):
+def priority_target_distances(sample):
     targets = sample.get('targets', {})
-    main = next((
+    priority_id = sample.get('priority_target_id')
+    priority = next((
         (target_id, value) for target_id, value in targets.items()
-        if value.get('is_main')
+        if target_id == priority_id or (
+            priority_id is None and value.get('is_main')
+        )
     ), None)
-    if main is None:
+    if priority is None:
         return None, None
-    main_id, main_value = main
+    selected_id, selected_value = priority
     robots = sample.get('robots', {})
     proxy = min((
-        math.dist(value['position'], main_value['position'])
+        math.dist(value['position'], selected_value['position'])
         for value in robots.values()
     ), default=None)
     assignments = sample.get('target_assignments')
     if assignments is None:
         return None, proxy
     exact = min((
-        math.dist(robots[robot_id]['position'], main_value['position'])
+        math.dist(robots[robot_id]['position'], selected_value['position'])
         for robot_id, target_id in assignments.items()
-        if target_id == main_id and robot_id in robots
+        if target_id == selected_id and robot_id in robots
     ), default=None)
     return exact, proxy
+
+
+def main_target_distances(sample):
+    """Legacy API alias for old analysis callers and recorded schemas."""
+    return priority_target_distances(sample)
 
 
 def graph_metrics(sample, config):

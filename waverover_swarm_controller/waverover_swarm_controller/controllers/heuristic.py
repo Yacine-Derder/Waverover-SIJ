@@ -127,43 +127,43 @@ class HeuristicController(SwarmController):
         station = np.asarray(snapshot.station.position, dtype=float)
         targets = tuple(snapshot.targets[key] for key in sorted(snapshot.targets))
         positions = []
-        main = next((target for target in targets if target.is_main), None)
-        main_count = 0
-        if main is not None:
-            target_position = np.asarray(main.position, dtype=float)
+        priority = next((target for target in targets if target.is_priority), None)
+        priority_count = 0
+        if priority is not None:
+            target_position = np.asarray(priority.position, dtype=float)
             distance = np.linalg.norm(target_position - station)
-            main_count = self.optimal_relay_count(distance)
+            priority_count = self.optimal_relay_count(distance)
             observation = 0.0
-            if main_count > len(robot_ids):
-                main_count = len(robot_ids)
+            if priority_count > len(robot_ids):
+                priority_count = len(robot_ids)
                 usable_range = self.config.communication.maximum_range_m - (
                     2.0 * self.config.vehicle.turn_radius_m
                 )
-                observation = max(0.0, distance - main_count * usable_range)
-            main_positions = self._relay_positions(
-                station, target_position, main_count, observation
+                observation = max(0.0, distance - priority_count * usable_range)
+            priority_positions = self._relay_positions(
+                station, target_position, priority_count, observation
             )
-            positions.extend(main_positions)
-            main_count = len(main_positions)
+            positions.extend(priority_positions)
+            priority_count = len(priority_positions)
 
-        unassigned = len(robot_ids) - main_count
-        secondary = [
+        unassigned = len(robot_ids) - priority_count
+        background = [
             np.asarray(target.position, dtype=float)
-            for target in targets if not target.is_main
+            for target in targets if not target.is_priority
         ]
-        cluster_count = min(unassigned, len(secondary))
-        secondary_positions = []
+        cluster_count = min(unassigned, len(background))
+        background_positions = []
         while cluster_count > 0:
-            centroids = self._kmeans(secondary, cluster_count)
+            centroids = self._kmeans(background, cluster_count)
             candidate = []
             for centroid in centroids:
                 count = self.optimal_relay_count(np.linalg.norm(centroid - station))
                 candidate.extend(self._relay_positions(station, centroid, count))
             if len(candidate) <= unassigned:
-                secondary_positions = candidate
+                background_positions = candidate
                 break
             cluster_count -= 1
-        positions.extend(secondary_positions)
+        positions.extend(background_positions)
 
         from scipy.optimize import linear_sum_assignment
         # Surplus rovers hold their measured positions. The previous station
@@ -211,16 +211,28 @@ class HeuristicController(SwarmController):
                 solve_duration_sec=time.monotonic() - started,
                 diagnostic='A station is required for relay generation.',
                 created_at=time.monotonic(),
+                target_epoch=snapshot.target_epoch,
             )
         available, reason = self.availability()
         if not available:
             raise ControllerUnavailableError(reason)
         setpoints = self.desired_positions(snapshot)
+        assignments = {
+            robot_id: min(
+                snapshot.targets.values(),
+                key=lambda target: (
+                    math.dist(point, target.position), target.target_id
+                ),
+            ).target_id
+            for robot_id, point in setpoints.items()
+        } if snapshot.targets else {}
         return ControllerResult(
             setpoints=setpoints,
+            target_assignments=assignments,
             selected_edges=self._selected_edges(snapshot, setpoints),
             solver_status='deterministic_heuristic',
             solve_duration_sec=time.monotonic() - started,
             diagnostic='Ported relay chains, clustering, and Hungarian assignment.',
             created_at=time.monotonic(),
+            target_epoch=snapshot.target_epoch,
         )

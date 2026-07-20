@@ -52,7 +52,7 @@ def test_controller_telemetry_is_versioned_structured_and_canonical(
         'none',
     )
 
-    assert payload['schema_version'] == 3
+    assert payload['schema_version'] == 4
     assert payload['result_state'] == 'valid'
     assert payload['commands_enabled'] is False
     assert 'armed' not in payload

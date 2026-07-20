@@ -9,7 +9,7 @@ from nav_msgs.msg import Path
 from rcl_interfaces.msg import SetParametersResult
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import Empty, String
 from visualization_msgs.msg import Marker, MarkerArray
@@ -22,6 +22,7 @@ from .metrics import algebraic_connectivity, minimum_pairwise_distance
 from .pose_aggregation import PoseAggregator, SnapshotUnavailableError
 from .safety import SafetyViolation, validate_controller_result
 from .telemetry import build_controller_telemetry, canonical_json
+from .target_dynamics import TargetManager
 from .waypoint_dispatcher import WaypointDispatcher
 
 
@@ -44,6 +45,10 @@ class SwarmCoordinator(Node):
             dry_run_override=dry_run,
         )
         self.controller = controller_from_config(self.config)
+        self.target_manager = TargetManager(
+            self.config.targets, self.config.target_dynamics,
+            start_time=time.monotonic(),
+        )
         self.dispatcher = WaypointDispatcher(
             self.config.robot_ids, self.config.waypoint_dispatch
         )
@@ -61,6 +66,7 @@ class SwarmCoordinator(Node):
         self.latest_handoff = 'none'
         self._cleanup_complete = False
         self._end_sent_for_stop = False
+        self._ack_warning_times = {}
 
         # The PC intentionally loads fleet naming without rover-local identity.
         from waverover.stack_config import (
@@ -82,6 +88,7 @@ class SwarmCoordinator(Node):
         self.waypoint_publishers = {}
         self.end_trial_publishers = {}
         self.pose_subscriptions = []
+        self.acknowledgement_subscriptions = []
         for robot_id in self.config.robot_ids:
             self.waypoint_publishers[robot_id] = self.create_publisher(
                 PointStamped,
@@ -102,6 +109,14 @@ class SwarmCoordinator(Node):
                 ),
                 best_effort,
             ))
+            self.acknowledgement_subscriptions.append(self.create_subscription(
+                PointStamped,
+                robot_topic(stack_config, 'waypoint_reached', robot_id),
+                lambda message, selected=robot_id: self._acknowledgement(
+                    selected, message
+                ),
+                reliable,
+            ))
 
         self.diagnostics_publisher = self.create_publisher(
             DiagnosticArray, 'diagnostics', reliable
@@ -109,6 +124,19 @@ class SwarmCoordinator(Node):
         self.telemetry_publisher = self.create_publisher(
             String, 'controller_telemetry', reliable
         )
+        target_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST, depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.target_state_publisher = self.create_publisher(
+            String, 'target_state', target_qos
+        )
+        initial_targets, initial_state = self.target_manager.snapshot(
+            time.monotonic()
+        )
+        self._publish_target_values(initial_targets, initial_state)
+        self._published_target_epoch = initial_state['target_epoch']
         self.markers_publisher = self.create_publisher(
             MarkerArray, 'markers', reliable
         )
@@ -146,9 +174,22 @@ class SwarmCoordinator(Node):
         return SetParametersResult(successful=True)
 
     def _snapshot(self):
+        now = time.monotonic()
+        targets, state = self.target_manager.snapshot(now)
+        self._target_state = state
+        if state['target_epoch'] != self._published_target_epoch:
+            self._publish_target_values(targets, state)
+            self._published_target_epoch = state['target_epoch']
         return self.aggregator.snapshot(
-            self.config.targets,
+            targets,
             self.config.station,
+            now=now,
+            priority_target_id=state['priority_target_id'],
+            target_epoch=state['target_epoch'],
+            target_epoch_started_at=state['target_epoch_started_at'],
+            target_switch_reason=state['switch_reason'],
+            target_selection_seed=state['target_selection_seed'],
+            next_target_switch_at=state['next_switch_at'],
         )
 
     def _compute_valid_result(self, snapshot):
@@ -200,8 +241,15 @@ class SwarmCoordinator(Node):
         self.latest_snapshot = snapshot
         self.latest_result = result
         if not self.dispatcher.faulted:
-            self.dispatcher.update_pending(result.setpoints)
+            try:
+                self.dispatcher.update_pending(
+                    result.setpoints, getattr(result, 'target_epoch', 0)
+                )
+            except TypeError:  # compatibility with narrow test/legacy adapters
+                self.dispatcher.update_pending(result.setpoints)
             self._dispatch(snapshot)
+        if hasattr(self, '_publish_target_state'):
+            self._publish_target_state(snapshot)
         self._publish_controller_telemetry(snapshot, result, 'valid')
         self._publish_visualization(snapshot, result)
         self._publish_diagnostics()
@@ -213,22 +261,64 @@ class SwarmCoordinator(Node):
             commands_enabled=not self.config.safety.dry_run,
         )
         for action in actions:
-            if action.kind == 'fault':
-                self._stop_trial(action.reason)
-                return
-            message = PointStamped()
-            message.header.stamp = self.get_clock().now().to_msg()
-            message.header.frame_id = self.config.frame_id
-            message.point.x = action.point[0]
-            message.point.y = action.point[1]
-            self.waypoint_publishers[action.robot_id].publish(message)
-            self.latest_handoff = '%s robot=%s point=(%.3f, %.3f)' % (
-                action.kind, action.robot_id, action.point[0], action.point[1]
-            )
-            self.get_logger().info(
-                'Waypoint %s robot=%s x=%.3f y=%.3f.'
-                % (action.kind, action.robot_id, action.point[0], action.point[1])
-            )
+            SwarmCoordinator._publish_dispatch_action(self, action)
+
+    def _publish_dispatch_action(self, action):
+        message = PointStamped()
+        message.header.stamp.sec = int(action.token[0])
+        message.header.stamp.nanosec = int(action.token[1])
+        message.header.frame_id = self.config.frame_id
+        message.point.x, message.point.y = action.point
+        self.waypoint_publishers[action.robot_id].publish(message)
+        self.latest_handoff = '%s robot=%s point=(%.3f, %.3f) token=%d.%09d' % (
+            action.kind, action.robot_id, action.point[0], action.point[1],
+            action.token[0], action.token[1],
+        )
+
+    def _acknowledgement(self, robot_id, message):
+        token = (int(message.header.stamp.sec), int(message.header.stamp.nanosec))
+        actions = self.dispatcher.acknowledge(
+            robot_id,
+            str(message.header.frame_id).strip(),
+            token,
+            (message.point.x, message.point.y),
+            time.monotonic(),
+            self.config.frame_id,
+        )
+        if not actions:
+            state = self.dispatcher.states[robot_id]
+            if state.last_acknowledged_token != token:
+                now = time.monotonic()
+                previous = self._ack_warning_times.get(robot_id)
+                if previous is None or now - previous >= 2.0:
+                    self._ack_warning_times[robot_id] = now
+                    self.get_logger().warn(
+                        'Ignored unmatched/stale waypoint acknowledgement '
+                        'robot=%s token=%d.%09d.'
+                        % (robot_id, token[0], token[1])
+                    )
+            return
+        for action in actions:
+            self._publish_dispatch_action(action)
+
+    def _publish_target_state(self, snapshot):
+        self._publish_target_values(snapshot.targets.values(), self._target_state)
+
+    def _publish_target_values(self, targets, state):
+        message = String()
+        message.data = canonical_json({
+            'schema_version': 1,
+            **state,
+            'targets': {
+                target.target_id: {
+                    'position': list(target.position),
+                    'weight': target.weight,
+                    'is_priority': target.is_priority,
+                }
+                for target in targets
+            },
+        })
+        self.target_state_publisher.publish(message)
 
     def _stop_trial(self, reason):
         self.latest_stop_reason = str(reason)
@@ -293,9 +383,25 @@ class SwarmCoordinator(Node):
                 'last_publication_age_sec',
                 'refresh_count',
                 'active_waypoint_overdue',
+                'active_token',
+                'last_acknowledged_token',
+                'acknowledgement_count',
+                'last_acknowledgement_monotonic_sec',
+                'last_acknowledgement_age_sec',
+                'unmatched_acknowledgement_count',
+                'handoff_cause',
+                'active_target_epoch',
+                'pending_target_epoch',
             ):
                 values[field + '_' + robot_id] = str(dispatch[field])
         if self.latest_snapshot is not None:
+            values['priority_target_id'] = str(
+                self.latest_snapshot.priority_target_id
+            )
+            values['target_epoch'] = str(self.latest_snapshot.target_epoch)
+            values['target_selection_seed'] = str(
+                self.latest_snapshot.target_selection_seed
+            )
             robot_points = [
                 state.position for state in self.latest_snapshot.robots.values()
             ]

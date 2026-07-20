@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import math
 from pathlib import Path
 import re
+import warnings
 
 import yaml
 
@@ -51,10 +52,21 @@ class ControllerConfig:
 
 @dataclass(frozen=True)
 class DispatchConfig:
-    reached_distance_m: float
-    handoff_delay_sec: float
     refresh_period_sec: float
     active_waypoint_warning_sec: float
+    reached_distance_m: float = 0.0
+    handoff_delay_sec: float = 0.0
+
+
+@dataclass(frozen=True)
+class TargetDynamicsConfig:
+    mode: str
+    switch_period_sec: float
+    priority_weight: float
+    background_weight: float
+    seed: int
+    initial_priority_target_id: object
+    avoid_immediate_repeat: bool
 
 
 @dataclass(frozen=True)
@@ -130,7 +142,8 @@ class ExperimentConfig:
     pose: PoseConfig
     station: StationState
     targets: tuple
-    main_target_id: str
+    priority_target_id: object
+    target_dynamics: TargetDynamicsConfig
     vehicle: VehicleConfig
     controller: ControllerConfig
     waypoint_dispatch: DispatchConfig
@@ -203,9 +216,14 @@ def load_targets(path, geofence):
     data = _read_yaml(path, 'targets file')
     if data.get('frame_id') != 'robotics_lab':
         raise ConfigError('targets frame_id must be robotics_lab.')
-    main_target_id = str(data.get('main_target_id', '')).strip()
-    if not main_target_id:
-        raise ConfigError('main_target_id must be nonempty.')
+    legacy_main_target_id = str(data.get('main_target_id', '')).strip() or None
+    if legacy_main_target_id is not None:
+        warnings.warn(
+            'main_target_id/static target weights are deprecated; '
+            'target_dynamics controls runtime priority.',
+            DeprecationWarning,
+            stacklevel=2,
+        )
     entries = data.get('targets')
     if not isinstance(entries, list) or not entries:
         raise ConfigError('targets must be a nonempty list.')
@@ -225,12 +243,18 @@ def load_targets(path, geofence):
             target_id=target_id,
             x=position[0],
             y=position[1],
-            weight=_finite(target.get('weight'), 'targets[%d].weight' % index, nonnegative=True),
-            is_main=target_id == main_target_id,
+            weight=_finite(
+                target.get('weight', 1.0),
+                'targets[%d].weight' % index,
+                nonnegative=True,
+            ),
+            is_priority=target_id == legacy_main_target_id,
         ))
-    if sum(target.target_id == main_target_id for target in targets) != 1:
-        raise ConfigError('Exactly one target must match main_target_id.')
-    return tuple(targets), main_target_id
+    if legacy_main_target_id is not None and sum(
+        target.target_id == legacy_main_target_id for target in targets
+    ) != 1:
+        raise ConfigError('Exactly one target must match legacy main_target_id.')
+    return tuple(targets), legacy_main_target_id
 
 
 def load_experiment(path, algorithm_override=None, dry_run_override=None):
@@ -258,6 +282,16 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
     vehicle_data = _mapping(data.get('vehicle'), 'vehicle')
     controller_data = _mapping(data.get('controller'), 'controller')
     dispatch_data = _mapping(data.get('waypoint_dispatch'), 'waypoint_dispatch')
+    deprecated_dispatch = {
+        'reached_distance_m', 'handoff_delay_sec'
+    }.intersection(dispatch_data)
+    if deprecated_dispatch:
+        warnings.warn(
+            '%s no longer control PC handoff; onboard acknowledgement is '
+            'authoritative.' % ', '.join(sorted(deprecated_dispatch)),
+            DeprecationWarning,
+            stacklevel=2,
+        )
     communication_data = _mapping(data.get('communication'), 'communication')
     safety_data = _mapping(data.get('safety'), 'safety')
     synthetic_data = _mapping(data.get('synthetic_mcs', {}), 'synthetic_mcs')
@@ -410,7 +444,45 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
     if not targets_path.is_absolute():
         targets_path = source_path.parent / targets_path
     targets_path = targets_path.resolve()
-    targets, main_target_id = load_targets(targets_path, geofence)
+    targets, legacy_priority_target_id = load_targets(targets_path, geofence)
+    if 'target_dynamics' in data:
+        target_source = _read_yaml(targets_path, 'targets file')
+        if 'main_target_id' in target_source or any(
+            isinstance(entry, dict) and 'weight' in entry
+            for entry in target_source.get('targets', [])
+        ):
+            raise ConfigError(
+                'New target_dynamics experiments require neutral target '
+                'definitions without main_target_id or static weights.'
+            )
+    dynamics_data = _mapping(data.get('target_dynamics', {}), 'target_dynamics')
+    dynamics_mode = str(dynamics_data.get('mode', 'random_priority')).strip().lower()
+    if dynamics_mode != 'random_priority':
+        raise ConfigError('target_dynamics.mode must be random_priority.')
+    priority_weight = _finite(
+        dynamics_data.get('priority_weight', 10.0),
+        'target_dynamics.priority_weight', positive=True,
+    )
+    background_weight = _finite(
+        dynamics_data.get('background_weight', 1.0),
+        'target_dynamics.background_weight', positive=True,
+    )
+    if priority_weight < background_weight:
+        raise ConfigError('priority_weight must be >= background_weight.')
+    initial_priority = dynamics_data.get(
+        'initial_priority_target_id', legacy_priority_target_id
+    )
+    if initial_priority is not None:
+        initial_priority = str(initial_priority).strip()
+        if initial_priority not in {target.target_id for target in targets}:
+            raise ConfigError('initial_priority_target_id must identify a target.')
+    avoid_repeat = dynamics_data.get('avoid_immediate_repeat', True)
+    if not isinstance(avoid_repeat, bool):
+        raise ConfigError('target_dynamics.avoid_immediate_repeat must be boolean.')
+    try:
+        target_seed = int(dynamics_data.get('seed', 2026))
+    except (TypeError, ValueError) as error:
+        raise ConfigError('target_dynamics.seed must be an integer.') from error
 
     ideal_range = _finite(
         communication_data.get('ideal_range_m'),
@@ -471,7 +543,19 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
         ),
         station=StationState(station_id, *station_position),
         targets=targets,
-        main_target_id=main_target_id,
+        priority_target_id=initial_priority,
+        target_dynamics=TargetDynamicsConfig(
+            mode=dynamics_mode,
+            switch_period_sec=_finite(
+                dynamics_data.get('switch_period_sec', 10.0),
+                'target_dynamics.switch_period_sec', positive=True,
+            ),
+            priority_weight=priority_weight,
+            background_weight=background_weight,
+            seed=target_seed,
+            initial_priority_target_id=initial_priority,
+            avoid_immediate_repeat=avoid_repeat,
+        ),
         vehicle=vehicle,
         controller=ControllerConfig(
             algorithm=algorithm,
@@ -483,8 +567,6 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
             distributed_update_semantics=semantics,
         ),
         waypoint_dispatch=DispatchConfig(
-            reached_distance_m=_finite(dispatch_data.get('reached_distance_m'), 'waypoint_dispatch.reached_distance_m', positive=True),
-            handoff_delay_sec=_finite(dispatch_data.get('handoff_delay_sec'), 'waypoint_dispatch.handoff_delay_sec', nonnegative=True),
             refresh_period_sec=_finite(
                 dispatch_data.get('refresh_period_sec', 1.0),
                 'waypoint_dispatch.refresh_period_sec',
@@ -498,6 +580,8 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
                 'waypoint_dispatch.active_waypoint_warning_sec',
                 positive=True,
             ),
+            reached_distance_m=float(dispatch_data.get('reached_distance_m', 0.0)),
+            handoff_delay_sec=float(dispatch_data.get('handoff_delay_sec', 0.0)),
         ),
         communication=CommunicationConfig(ideal_range, maximum_range),
         safety=SafetyConfig(

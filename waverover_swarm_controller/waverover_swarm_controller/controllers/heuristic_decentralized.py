@@ -12,18 +12,24 @@ class DecentralizedHeuristicController(HeuristicController):
     def __init__(self, config):
         super().__init__(config)
         self._agent_targets = {}
+        self._target_epoch = None
 
     def _assign_clusters(self, snapshot):
         robot_ids = tuple(sorted(snapshot.robots))
         targets = tuple(snapshot.targets[key] for key in sorted(snapshot.targets))
+        if self._target_epoch != snapshot.target_epoch:
+            self._agent_targets.clear()
+            self._target_epoch = snapshot.target_epoch
         self._agent_targets = {
             key: value for key, value in self._agent_targets.items()
             if key in snapshot.robots and value in snapshot.targets
         }
         if not targets:
             return
-        main = next((target for target in targets if target.is_main), targets[0])
-        ordered_targets = (main,) + tuple(target for target in targets if target != main)
+        priority = next((target for target in targets if target.is_priority), targets[0])
+        ordered_targets = (priority,) + tuple(
+            target for target in targets if target != priority
+        )
         for index, robot_id in enumerate(robot_ids):
             if robot_id not in self._agent_targets:
                 self._agent_targets[robot_id] = ordered_targets[
@@ -81,6 +87,7 @@ class DecentralizedHeuristicController(HeuristicController):
                 solve_duration_sec=time.monotonic() - started,
                 diagnostic='Per-agent relay logic requires a station.',
                 created_at=time.monotonic(),
+                target_epoch=snapshot.target_epoch,
             )
         self._assign_clusters(snapshot)
         setpoints = {}
@@ -102,4 +109,5 @@ class DecentralizedHeuristicController(HeuristicController):
                 'no inter-agent ROS transport.'
             ),
             created_at=time.monotonic(),
+            target_epoch=snapshot.target_epoch,
         )

@@ -159,6 +159,7 @@ def load_stack_config(
     for topic_key in (
         'cmd_vel',
         'waypoints',
+        'waypoint_reached',
         'end_trial',
         'scan',
         'imu',

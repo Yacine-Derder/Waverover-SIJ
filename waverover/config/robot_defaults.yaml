@@ -20,6 +20,7 @@ nodes:
 topics:
   cmd_vel: cmd_vel
   waypoints: waypoints
+  waypoint_reached: waypoint_reached
   end_trial: end_trial
   scan: scan
   imu: imu/data_raw

@@ -4,6 +4,7 @@ import argparse
 from dataclasses import asdict
 from datetime import datetime, timezone
 import importlib.metadata
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -39,6 +40,15 @@ from .experiment_recording import (
     write_qos_overrides,
 )
 from .synthetic_motion import derive_rover_seed
+from .target_dynamics import TargetManager
+
+
+def derive_component_seed(master_seed, domain):
+    """Derive independent stable seeds without shared RNG consumption."""
+    payload = ('waverover.seed.v1\0%s\0%d' % (
+        str(domain), int(master_seed)
+    )).encode('utf-8')
+    return int.from_bytes(hashlib.sha256(payload).digest()[:8], 'big')
 
 
 class RunEventPublisher(Node):
@@ -154,10 +164,15 @@ def _close_child_log(child):
         stream.close()
 
 
-def _resolved_run_config(config_path, destination, algorithm, seed):
+def _resolved_run_config(
+    config_path, destination, algorithm, synthetic_seed, target_seed=None
+):
     source = yaml.safe_load(Path(config_path).read_text(encoding='utf-8'))
     source.setdefault('controller', {})['algorithm'] = algorithm
-    source.setdefault('synthetic_mcs', {})['seed'] = int(seed)
+    source.setdefault('synthetic_mcs', {})['seed'] = int(synthetic_seed)
+    source.setdefault('target_dynamics', {})['seed'] = int(
+        synthetic_seed if target_seed is None else target_seed
+    )
     source['targets_file'] = 'targets.yaml'
     with Path(destination).open('w', encoding='utf-8') as stream:
         yaml.safe_dump(source, stream, sort_keys=False)
@@ -189,9 +204,11 @@ def main(args=None):
             if arguments.seed is not None else original_config.synthetic_mcs.seed
         )
     )
-    actual_seed = (
+    master_seed = (
         secrets.randbits(63) if requested_seed is None else int(requested_seed)
     )
+    synthetic_seed = derive_component_seed(master_seed, 'synthetic_motion')
+    target_seed = derive_component_seed(master_seed, 'target_selection')
     root = (
         Path(arguments.output_root).expanduser()
         if arguments.output_root else (
@@ -202,7 +219,7 @@ def main(args=None):
     profile = arguments.profile or original_config.recording.profile
     pose_source = original_config.recording.pose_source
     run_id, run_directory = create_run_directory(
-        root, algorithm, pose_source, actual_seed
+        root, algorithm, pose_source, master_seed
     )
     resolved_config_path = run_directory / 'config' / 'experiment.yaml'
     targets_copy = run_directory / 'config' / 'targets.yaml'
@@ -211,9 +228,13 @@ def main(args=None):
         original_config.source_path,
         resolved_config_path,
         algorithm,
-        actual_seed,
+        synthetic_seed,
+        target_seed,
     )
     config = load_experiment(resolved_config_path)
+    resolved_initial_priority = TargetManager(
+        config.targets, config.target_dynamics, start_time=0.0
+    ).priority_target_id
     duration = (
         arguments.duration_sec
         if arguments.duration_sec is not None
@@ -268,7 +289,11 @@ def main(args=None):
         'dry_run': config.safety.dry_run,
         'pose_source': pose_source,
         'synthetic_mode': config.synthetic_mcs.mode,
-        'synthetic_seed': actual_seed,
+        'master_seed': master_seed,
+        'synthetic_seed': synthetic_seed,
+        'target_selection_seed': target_seed,
+        'initial_priority_target_id': resolved_initial_priority,
+        'target_dynamics': asdict(config.target_dynamics),
         'synthetic_formation_coupling': (
             config.synthetic_mcs.formation_coupling
         ),
@@ -277,13 +302,20 @@ def main(args=None):
         ),
         'synthetic_initial_radius_m': config.synthetic_mcs.initial_radius_m,
         'synthetic_derived_rover_seeds': {
-            robot_id: derive_rover_seed(actual_seed, robot_id)
+            robot_id: derive_rover_seed(synthetic_seed, robot_id)
             for robot_id in sorted(config.robot_ids)
         },
         'requested_duration_sec': duration,
         'robot_ids': list(config.robot_ids),
         'station': asdict(config.station),
-        'targets': [asdict(target) for target in config.targets],
+        'targets': [
+            {
+                'target_id': target.target_id,
+                'x': target.x,
+                'y': target.y,
+            }
+            for target in config.targets
+        ],
         'communication': asdict(config.communication),
         'waypoint_dispatch': asdict(config.waypoint_dispatch),
         'safety': asdict(config.safety),

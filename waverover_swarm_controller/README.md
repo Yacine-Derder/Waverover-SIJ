@@ -28,6 +28,15 @@ The active point is refreshed at the configured monotonic interval (default
 `1.0 s`). The rover controller coalesces consecutive coordinate-equivalent
 refreshes, so they do not grow its FIFO.
 
+Each newly activated logical waypoint receives a unique `header.stamp` token.
+Refreshes reuse it exactly. When the onboard controller removes that waypoint,
+it echoes the original frame, coordinates, and stamp on the reliable
+`/waverover_<ID>/waypoint_reached` topic. Only an exact robot/frame/token/point
+match clears PC active state and promotes the newest pending result. A bounded
+onboard reached-token cache prevents a delayed refresh from requeueing an
+acknowledged command. MCS distance is not a handoff signal; a missing
+acknowledgement only produces the non-fatal overdue warning.
+
 There is no arming service or armed state. In live mode, fresh synchronized
 poses and a valid controller result immediately enable waypoint publication.
 Diagnostics, markers, and predicted paths are under `/waverover_swarm`.
@@ -36,7 +45,7 @@ Diagnostics, markers, and predicted paths are under `/waverover_swarm`.
 
 Five controllers were ported from `Yacine-Derder/drone-simulator-master`:
 
-- `heuristic`: main-target relay chain, deterministic secondary clustering,
+- `heuristic`: current-priority relay chain, deterministic background clustering,
   required-relay calculation, and Hungarian robot/position assignment.
 - `heuristic_decentralized`: PC-hosted target-aware agents with a distinct
   per-agent computation boundary and local relay-chain decisions. It does not
@@ -137,16 +146,37 @@ file unless it is absolute.
 
 ```yaml
 frame_id: robotics_lab
-main_target_id: target_main
 targets:
-  - id: target_main
+  - id: target_0
     position: [2.5, 0.0]
-    weight: 10.0
+  - id: target_1
+    position: [0.0, 2.5]
 ```
 
-IDs are stable strings and need not be contiguous integers. The loader
-requires unique nonempty IDs, exactly one main target, finite positions and
-weights, nonnegative weights, and positions inside the experiment geofence.
+Target layouts contain only neutral IDs and static positions. Runtime priority
+belongs to the experiment configuration:
+
+```yaml
+target_dynamics:
+  mode: random_priority
+  switch_period_sec: 10.0
+  priority_weight: 10.0
+  background_weight: 1.0
+  seed: 2026
+  initial_priority_target_id: null
+  avoid_immediate_repeat: true
+```
+
+IDs are sorted before selection, so YAML order cannot change the sequence.
+Selection uses a dedicated deterministic RNG, absolute monotonic 10-second
+epochs, missed-boundary catch-up, and no consecutive repeat when two or more
+targets exist. `run_experiment --seed` derives independent synthetic-motion
+and target-selection seeds with stable domain-separated hashing and records
+both in the versioned manifest. The loader requires unique nonempty IDs,
+finite positions inside the geofence, positive finite periods and weights,
+and `priority_weight >= background_weight`. Legacy `main_target_id`, static
+weights, `reached_distance_m`, and `handoff_delay_sec` still parse with
+deprecation warnings but do not control new runtime handoff/priority behavior.
 The supplied target coordinates, `1.5/2.0 m` communication ranges, and
 `[-4, 4] m` geofence are illustrative. Verify them against the actual
 `robotics_lab` origin, floor area, MCS calibration, radio behavior, and rover
@@ -381,7 +411,7 @@ is the preferred first test with real MCS data.
 | Allowed pose age and inter-rover timestamp skew | `pose.timeout_sec`, `pose.maximum_snapshot_skew_sec` |
 | Station coordinates | `station.position` |
 | Target file | `targets_file` in the experiment YAML |
-| Target coordinates, weights, and main target | the referenced targets YAML |
+| Target coordinates | the referenced neutral targets YAML |
 | Rover motion model | `vehicle` |
 | Control period, MPC horizon/step, seed, distributed semantics | `controller` |
 | Handoff tolerance/delay, refresh period, and overdue warning | `waypoint_dispatch` |

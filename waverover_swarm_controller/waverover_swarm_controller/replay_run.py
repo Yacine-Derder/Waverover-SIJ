@@ -174,12 +174,22 @@ class ReplayApp:
         axis.scatter([config.station.x], [config.station.y], marker='s',
                      s=80, color='black')
         axis.text(config.station.x, config.station.y, config.station.station_id)
+        telemetry = self._telemetry_at()
+        recorded_targets = telemetry.get('targets', {})
+        priority_id = telemetry.get('priority_target_id')
         for target in config.targets:
-            axis.scatter([target.x], [target.y], s=120,
-                         marker='*' if target.is_main else 'X',
-                         color='red' if target.is_main else 'orange')
-            axis.text(target.x, target.y,
-                      '%s (w=%.2g)' % (target.target_id, target.weight))
+            runtime = recorded_targets.get(target.target_id, {})
+            weight = runtime.get('weight', target.weight)
+            is_priority = target.target_id == priority_id
+            axis.scatter(
+                [target.x], [target.y], s=120,
+                marker='*' if is_priority else 'X',
+                color='red' if is_priority else 'orange',
+            )
+            axis.text(
+                target.x, target.y,
+                '%s (w=%.2g)' % (target.target_id, weight),
+            )
         poses = {}
         for index, robot_id in enumerate(config.robot_ids):
             pose = interpolate_pose(
@@ -213,7 +223,6 @@ class ReplayApp:
                     (x, y), config.safety.minimum_separation_m,
                     fill=False, color='red', alpha=0.12
                 ))
-        telemetry = self._telemetry_at()
         nodes = {config.station.station_id: config.station.position, **poses}
         if self.flags['communication graph']:
             node_ids = sorted(nodes)
@@ -251,6 +260,12 @@ class ReplayApp:
             for robot_id, point in telemetry.get(key, {}).items():
                 if point is not None:
                     axis.scatter([point[0]], [point[1]], marker=marker, color=color)
+        for values in telemetry.get('waypoint_dispatch', {}).values():
+            point = values.get('last_acknowledged_waypoint')
+            if point is not None:
+                axis.scatter(
+                    [point[0]], [point[1]], marker='P', color='magenta'
+                )
         connectivity = telemetry.get('connectivity', {})
         axis.set_title(
             '%s | solver=%s | state=%s | stop=%s\n'

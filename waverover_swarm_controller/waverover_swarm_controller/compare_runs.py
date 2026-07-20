@@ -14,7 +14,7 @@ from .experiment_recording import utc_timestamp
 
 SCALAR_PATHS = {
     'cumulative_J': ('mission_cost', 'cumulative_integral'),
-    'd_main_mean': ('main_target_distance', 'minimum_any_rover_proxy', 'mean'),
+    'd_priority_mean': ('priority_target_distance', 'minimum_any_rover_proxy', 'mean'),
     'lambda_2_mean': ('connectivity', 'binary_lambda_2', 'mean'),
     'computation_time_mean': ('computation', 'duration_sec', 'mean'),
     'connectivity_outages': ('connectivity', 'outage_count'),
@@ -49,10 +49,11 @@ def discover_runs(paths):
 
 def compatibility_key(manifest):
     targets = tuple(sorted(
-        (target['target_id'], target['x'], target['y'], target['weight'])
+        (target['target_id'], target['x'], target['y'])
         for target in manifest.get('targets', [])
     ))
     communication = manifest.get('communication', {})
+    dynamics = manifest.get('target_dynamics', {})
     return (
         manifest.get('algorithm'),
         manifest.get('synthetic_mode'),
@@ -62,6 +63,10 @@ def compatibility_key(manifest):
         communication.get('ideal_range_m'),
         communication.get('maximum_range_m'),
         manifest.get('requested_duration_sec'),
+        dynamics.get('switch_period_sec'),
+        dynamics.get('priority_weight'),
+        dynamics.get('background_weight'),
+        manifest.get('target_selection_seed', dynamics.get('seed')),
     )
 
 

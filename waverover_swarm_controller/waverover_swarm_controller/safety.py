@@ -26,6 +26,11 @@ def validate_controller_result(config, snapshot, result, now):
         raise SafetyViolation('Snapshot frame is not robotics_lab.')
     if now - result.created_at > config.safety.controller_result_timeout_sec:
         raise SafetyViolation('Controller result is stale.')
+    if int(result.target_epoch) != int(snapshot.target_epoch):
+        raise SafetyViolation(
+            'Controller result target epoch %d does not match snapshot epoch %d.'
+            % (result.target_epoch, snapshot.target_epoch)
+        )
     expected = set(snapshot.robots)
     received = set(result.setpoints)
     if received != expected:

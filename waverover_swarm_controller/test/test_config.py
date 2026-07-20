@@ -36,17 +36,13 @@ def test_calibrated_defaults_and_pc_robot_ids():
     assert config.analysis.connectivity_alpha == pytest.approx(5.0)
 
 
-def test_targets_use_string_ids_and_exactly_one_main():
+def test_targets_use_neutral_string_ids():
     config = load_experiment(example_path())
     ids = [target.target_id for target in config.targets]
 
-    assert ids == [
-        'target_main',
-        'target_secondary_1',
-        'target_secondary_2',
-        'target_secondary_3',
-    ]
-    assert sum(target.is_main for target in config.targets) == 1
+    assert ids == ['target_0', 'target_1', 'target_2', 'target_3']
+    assert not any(target.is_priority for target in config.targets)
+    assert config.target_dynamics.mode == 'random_priority'
 
 
 def test_missing_pipeline_sections_keep_backward_compatible_defaults(tmp_path):
@@ -92,7 +88,7 @@ def test_duplicate_target_and_outside_geofence_are_rejected(tmp_path):
     source = yaml.safe_load(example_path().read_text(encoding='utf-8'))
     targets_path = Path(__file__).parents[1] / 'config' / 'targets.yaml'
     targets = yaml.safe_load(targets_path.read_text(encoding='utf-8'))
-    targets['targets'][1]['id'] = 'target_main'
+    targets['targets'][1]['id'] = 'target_0'
     local_targets = tmp_path / 'targets.yaml'
     local_targets.write_text(yaml.safe_dump(targets), encoding='utf-8')
     source['targets_file'] = 'targets.yaml'

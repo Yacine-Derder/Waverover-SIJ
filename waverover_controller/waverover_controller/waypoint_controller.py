@@ -36,6 +36,7 @@ class ControllerConfig:
     robot_frame: str
     cmd_vel_topic: str
     waypoint_topic: str
+    waypoint_reached_topic: str
     end_trial_topic: str
     control_rate_hz: float
     goal_tolerance_m: float
@@ -62,6 +63,7 @@ class ControllerConfig:
             robot_frame=robot_frame(stack_config, 'base', robot_name),
             cmd_vel_topic=str(topics['cmd_vel']),
             waypoint_topic=str(topics['waypoints']),
+            waypoint_reached_topic=str(topics['waypoint_reached']),
             end_trial_topic=str(topics['end_trial']),
             control_rate_hz=float(controller['control_rate_hz']),
             goal_tolerance_m=float(controller['goal_tolerance_m']),
@@ -308,6 +310,9 @@ class WaypointController(Node):
             'waypoint_topic',
             config.waypoint_topic
         ).value)
+        self.waypoint_reached_topic = str(self.declare_parameter(
+            'waypoint_reached_topic', config.waypoint_reached_topic
+        ).value)
         self.end_trial_topic = str(self.declare_parameter(
             'end_trial_topic',
             config.end_trial_topic
@@ -400,6 +405,15 @@ class WaypointController(Node):
             self._waypoint_callback,
             waypoint_qos,
         )
+        self.waypoint_reached_publisher = self.create_publisher(
+            PointStamped,
+            self.waypoint_reached_topic,
+            QoSProfile(
+                history=HistoryPolicy.KEEP_LAST,
+                depth=self.waypoint_qos_depth,
+                reliability=ReliabilityPolicy.RELIABLE,
+            ),
+        )
         self.end_trial_subscription = self.create_subscription(
             Empty,
             self.end_trial_topic,
@@ -426,6 +440,11 @@ class WaypointController(Node):
                 self.mcs_qos_depth,
             )
         self.waypoint_queue = deque()
+        # Tokens are kept alongside coordinates to retain compatibility with
+        # the established coordinate-only queue/UI behavior.
+        self.waypoint_tokens = deque()
+        self._reached_token_order = deque(maxlen=256)
+        self._reached_tokens = set()
         self.received_any_waypoint = False
         self.last_bank_direction = None
         self.loiter_direction = None
@@ -561,6 +580,11 @@ class WaypointController(Node):
         return yaml_data
 
     def _waypoint_callback(self, message):
+        if not hasattr(self, 'waypoint_tokens'):
+            self.waypoint_tokens = deque()
+        if not hasattr(self, '_reached_token_order'):
+            self._reached_token_order = deque(maxlen=256)
+            self._reached_tokens = set()
         frame_id = message.header.frame_id.strip()
         if frame_id != self.global_frame:
             self.get_logger().warn(
@@ -576,6 +600,32 @@ class WaypointController(Node):
             self.get_logger().warn(
                 'Rejected non-finite waypoint (x=%s, y=%s, z=%s).'
                 % (x, y, z)
+            )
+            return
+
+        token = (int(message.header.stamp.sec), int(message.header.stamp.nanosec))
+        if token[0] < 0 or not 0 <= token[1] < 1000000000:
+            self.get_logger().warn('Rejected waypoint with malformed stamp token.')
+            return
+        if token == (0, 0):
+            # Legacy UI publishers did not stamp messages. Keep accepting
+            # them, but synthesize an onboard-only token; PC commands are
+            # always stamped and therefore remain strictly correlated.
+            value = max(1, int(time.monotonic() * 1000000000))
+            token = (value // 1000000000, value % 1000000000)
+        if token in self._reached_tokens:
+            self._info_throttled(
+                'reached_waypoint_refresh',
+                'Suppressed delayed refresh for already reached waypoint token %d.%09d.'
+                % token,
+                period_sec=5.0,
+            )
+            return
+        if any(queued_token == token for _frame, queued_token in self.waypoint_tokens):
+            self._info_throttled(
+                'duplicate_waypoint_token',
+                'Suppressed duplicate queued waypoint token %d.%09d.' % token,
+                period_sec=5.0,
             )
             return
 
@@ -599,6 +649,7 @@ class WaypointController(Node):
         was_trial_ended = self.trial_ended
         self.trial_ended = False
         self.waypoint_queue.append((x, y))
+        self.waypoint_tokens.append((frame_id, token))
         self.received_any_waypoint = True
 
         if was_trial_ended:
@@ -627,6 +678,8 @@ class WaypointController(Node):
     def _end_trial_callback(self, _message):
         cleared_waypoints = len(self.waypoint_queue)
         self.waypoint_queue.clear()
+        if hasattr(self, 'waypoint_tokens'):
+            self.waypoint_tokens.clear()
         self.loitering = False
         self.loiter_direction = None
         self.last_bank_direction = None
@@ -670,6 +723,21 @@ class WaypointController(Node):
 
         if distance < self.goal_tolerance_m:
             reached_x, reached_y = self.waypoint_queue.popleft()
+            reached_frame, reached_token = self.waypoint_tokens.popleft()
+            acknowledgement = PointStamped()
+            acknowledgement.header.frame_id = reached_frame
+            acknowledgement.header.stamp.sec = reached_token[0]
+            acknowledgement.header.stamp.nanosec = reached_token[1]
+            acknowledgement.point.x = reached_x
+            acknowledgement.point.y = reached_y
+            if reached_token not in self._reached_tokens:
+                if len(self._reached_token_order) == self._reached_token_order.maxlen:
+                    self._reached_tokens.discard(self._reached_token_order[0])
+                self._reached_token_order.append(reached_token)
+                self._reached_tokens.add(reached_token)
+            publisher = getattr(self, 'waypoint_reached_publisher', None)
+            if publisher is not None:
+                publisher.publish(acknowledgement)
             remaining = len(self.waypoint_queue)
 
             if remaining:

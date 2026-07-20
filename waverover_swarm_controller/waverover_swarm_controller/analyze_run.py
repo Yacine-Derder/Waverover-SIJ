@@ -14,7 +14,7 @@ from .analysis_metrics import (
     descriptive_statistics,
     graph_metrics,
     integrate_series,
-    main_target_distances,
+    priority_target_distances,
     mission_cost,
     separation_metrics,
 )
@@ -65,7 +65,7 @@ def compute_analysis(data):
         else:
             communication = target = total = None
             exact = None
-        main_exact, main_proxy = main_target_distances(sample)
+        main_exact, main_proxy = priority_target_distances(sample)
         graph = graph_metrics(sample, config) or {}
         separation, pair = separation_metrics(sample)
         predicted = sample.get('predicted_minimum_separation', {})
@@ -98,6 +98,8 @@ def compute_analysis(data):
         previous_graph_edges = graph_edges
         rows.append({
             'elapsed_sec': elapsed,
+            'priority_target_id': sample.get('priority_target_id'),
+            'target_epoch': sample.get('target_epoch', 0),
             'result_state': sample.get('result_state'),
             'solver_status': sample.get('solver_status'),
             'solve_duration_sec': sample.get('solve_duration_sec'),
@@ -105,8 +107,8 @@ def compute_analysis(data):
             'target_distance_cost': target,
             'mission_cost_total': total,
             'mission_cost_exact': exact,
-            'main_target_distance_exact_m': main_exact,
-            'main_target_distance_proxy_m': main_proxy,
+            'priority_target_distance_exact_m': main_exact,
+            'priority_target_distance_proxy_m': main_proxy,
             'binary_lambda_2': graph.get('binary_lambda_2'),
             'weighted_lambda_2': graph.get('weighted_lambda_2'),
             'connected_components': graph.get('connected_components'),
@@ -121,6 +123,7 @@ def compute_analysis(data):
                 float(np.mean(tracking_errors)) if tracking_errors else None
             ),
             'stop_reason': sample.get('stop_reason', ''),
+            'target_assignments': sample.get('target_assignments'),
         })
     times = [row['elapsed_sec'] for row in rows]
     cost_values = [row['mission_cost_total'] for row in rows]
@@ -276,20 +279,17 @@ def compute_analysis(data):
         for target_id in (sample.get('target_assignments') or {}).values():
             target_occupancy[target_id] = target_occupancy.get(target_id, 0) + 1
 
-    main_proxy_values = [
-        row['main_target_distance_proxy_m'] for row in rows
-    ]
     coverage_threshold = config.controller.minimum_mpc_lookahead_m
     convergence_time = next((
         row['elapsed_sec'] for row in rows
-        if row['main_target_distance_proxy_m'] is not None
-        and row['main_target_distance_proxy_m'] <= coverage_threshold
+        if row['priority_target_distance_proxy_m'] is not None
+        and row['priority_target_distance_proxy_m'] <= coverage_threshold
     ), None)
     coverage_duration = sum(
         max(0.0, second['elapsed_sec'] - first['elapsed_sec'])
         for first, second in zip(rows, rows[1:])
-        if first['main_target_distance_proxy_m'] is not None
-        and first['main_target_distance_proxy_m'] <= coverage_threshold
+        if first['priority_target_distance_proxy_m'] is not None
+        and first['priority_target_distance_proxy_m'] <= coverage_threshold
     )
     speed_references = (
         config.vehicle.straight_speed_mps,
@@ -309,10 +309,54 @@ def compute_analysis(data):
         for rate in realized_yaw_rates
     ]
 
+    epoch_groups = {}
+    for row in rows:
+        epoch_groups.setdefault(row['target_epoch'], []).append(row)
+    target_epochs = []
+    for epoch, epoch_rows in sorted(epoch_groups.items()):
+        start = epoch_rows[0]['elapsed_sec']
+        end = epoch_rows[-1]['elapsed_sec']
+        response = next((
+            row['elapsed_sec'] - start for row in epoch_rows
+            if row['priority_target_distance_proxy_m'] is not None
+            and row['priority_target_distance_proxy_m'] <= coverage_threshold
+        ), None)
+        occupancy = {}
+        for row in epoch_rows:
+            for target_id in (row.get('target_assignments') or {}).values():
+                occupancy[target_id] = occupancy.get(target_id, 0) + 1
+        target_epochs.append({
+            'target_epoch': epoch,
+            'priority_target_id': epoch_rows[0]['priority_target_id'],
+            'start_elapsed_sec': start,
+            'duration_sec': max(0.0, end - start),
+            'response_convergence_time_sec': response,
+            'priority_target_distance': descriptive_statistics([
+                row['priority_target_distance_proxy_m'] for row in epoch_rows
+            ]),
+            'weighted_mission_cost': descriptive_statistics([
+                row['mission_cost_total'] for row in epoch_rows
+            ]),
+            'target_assignment_occupancy': occupancy,
+        })
+
     waypoint_count = sum(
         len(data['samples'].get('/waverover_%s/waypoints' % robot_id, []))
         for robot_id in config.robot_ids
     )
+    acknowledgement_counts = {}
+    for event in data.get('acknowledgement_events', []):
+        robot_id = event['robot_id']
+        acknowledgement_counts[robot_id] = (
+            acknowledgement_counts.get(robot_id, 0) + 1
+        )
+    unmatched_acknowledgements = {}
+    for sample in data['telemetry']:
+        for robot_id, state in sample.get('waypoint_dispatch', {}).items():
+            unmatched_acknowledgements[robot_id] = max(
+                unmatched_acknowledgements.get(robot_id, 0),
+                int(state.get('unmatched_acknowledgement_count', 0)),
+            )
     cmd_topics_present = all(
         '/waverover_%s/cmd_vel' % robot_id in data['topic_types']
         for robot_id in config.robot_ids
@@ -362,7 +406,7 @@ def compute_analysis(data):
         for value in data['synthetic_metadata']
     ]
     summary = {
-        'schema_version': 1,
+        'schema_version': 2,
         'run_id': data['manifest'].get('run_id'),
         'run_state': data['manifest'].get('state'),
         'algorithm': data['manifest'].get('algorithm'),
@@ -388,18 +432,19 @@ def compute_analysis(data):
             'total': descriptive_statistics(cost_values),
             'cumulative_integral': integrate_series(times, cost_values),
         },
-        'main_target_distance': {
+        'priority_target_distance': {
             'assigned': descriptive_statistics([
-                row['main_target_distance_exact_m'] for row in rows
+                row['priority_target_distance_exact_m'] for row in rows
             ]),
             'minimum_any_rover_proxy': descriptive_statistics([
-                row['main_target_distance_proxy_m'] for row in rows
+                row['priority_target_distance_proxy_m'] for row in rows
             ]),
             'coverage_threshold_m': coverage_threshold,
             'convergence_time_sec': convergence_time,
             'coverage_duration_sec': coverage_duration,
             'target_switch_response': None,
         },
+        'target_epochs': target_epochs,
         'connectivity': {
             'binary_lambda_2': descriptive_statistics(lambda_values),
             'weighted_lambda_2': descriptive_statistics([
@@ -501,6 +546,10 @@ def compute_analysis(data):
                 row['snapshot_skew_sec'] for row in rows
             ]),
             'waypoint_count': waypoint_count,
+            'waypoint_acknowledgement_count_by_rover': acknowledgement_counts,
+            'unmatched_acknowledgement_count_by_rover': (
+                unmatched_acknowledgements
+            ),
             'waypoint_publication_rate_hz': (
                 waypoint_count / max(1e-9, data['end_time'] - data['start_time'])
             ),
@@ -553,7 +602,7 @@ def _write_plots(analysis_directory, rows, pose_paths, config):
     figure, axes = plt.subplots(2, 2, figsize=(12, 8))
     series = (
         ('mission_cost_total', 'Mission cost J'),
-        ('main_target_distance_proxy_m', 'Main-target distance proxy [m]'),
+        ('priority_target_distance_proxy_m', 'Priority-target distance proxy [m]'),
         ('binary_lambda_2', 'Binary lambda_2'),
         ('current_minimum_separation_m', 'Minimum separation [m]'),
     )
@@ -587,7 +636,7 @@ def _write_plots(analysis_directory, rows, pose_paths, config):
                       label=robot_id)
     axis.scatter([config.station.x], [config.station.y], marker='s', label='station')
     for target in config.targets:
-        axis.scatter([target.x], [target.y], marker='*' if target.is_main else 'x')
+        axis.scatter([target.x], [target.y], marker='x')
         axis.text(target.x, target.y, target.target_id)
     fence = config.safety.geofence
     axis.set_xlim(fence.x_min, fence.x_max)

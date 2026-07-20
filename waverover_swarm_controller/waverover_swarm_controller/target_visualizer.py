@@ -10,49 +10,37 @@ def load_visualization_data(targets_file, experiment_file=None):
     """Load targets strictly, optionally against an experiment geofence."""
     if experiment_file:
         experiment = load_experiment(experiment_file)
-        targets, main_target_id = load_targets(
+        targets, legacy_priority_id = load_targets(
             Path(targets_file).expanduser().resolve(),
             experiment.safety.geofence,
         )
-        return targets, main_target_id, experiment
+        return targets, legacy_priority_id, experiment
     unbounded = GeofenceConfig(
         x_min=float('-inf'),
         x_max=float('inf'),
         y_min=float('-inf'),
         y_max=float('inf'),
     )
-    targets, main_target_id = load_targets(
+    targets, legacy_priority_id = load_targets(
         Path(targets_file).expanduser().resolve(), unbounded
     )
-    return targets, main_target_id, None
+    return targets, legacy_priority_id, None
 
 
-def build_figure(targets, main_target_id, experiment=None, title=None):
+def build_figure(targets, _legacy_priority_id=None, experiment=None, title=None):
     """Create a Matplotlib target figure without displaying or saving it."""
     from matplotlib import pyplot as plt
     from matplotlib.patches import Circle, Rectangle
 
     figure, axes = plt.subplots()
-    main_target = next(
-        target for target in targets if target.target_id == main_target_id
-    )
-    secondary = [
-        target for target in targets if target.target_id != main_target_id
-    ]
     axes.scatter(
-        [main_target.x], [main_target.y],
-        marker='*', s=220, color='red', label='Main target', zorder=5,
+        [target.x for target in targets],
+        [target.y for target in targets],
+        marker='o', s=70, color='tab:blue', label='Targets', zorder=4,
     )
-    if secondary:
-        axes.scatter(
-            [target.x for target in secondary],
-            [target.y for target in secondary],
-            marker='o', s=70, color='tab:blue', label='Secondary targets',
-            zorder=4,
-        )
     for target in targets:
         axes.annotate(
-            '%s\nweight=%g' % (target.target_id, target.weight),
+            target.target_id,
             target.position,
             xytext=(6, 6),
             textcoords='offset points',
@@ -139,11 +127,11 @@ def main(args=None):
     if options.no_show:
         import matplotlib
         matplotlib.use('Agg')
-    targets, main_target_id, experiment = load_visualization_data(
+    targets, legacy_priority_id, experiment = load_visualization_data(
         options.targets_file, options.experiment_file
     )
     figure = build_figure(
-        targets, main_target_id, experiment, title=options.title
+        targets, legacy_priority_id, experiment, title=options.title
     )
     if options.output:
         output = Path(options.output).expanduser()

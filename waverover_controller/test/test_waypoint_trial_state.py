@@ -39,6 +39,7 @@ def make_controller(control_mode='fixed_wing'):
         _last_throttled_log={},
         control_mode=control_mode,
         cmd_vel_publisher=Publisher(),
+        waypoint_reached_publisher=Publisher(),
     )
     controller.get_logger = lambda: Logger()
     controller._info_throttled = lambda *_args, **_kwargs: None
@@ -53,6 +54,12 @@ def waypoint(x=1.0, y=2.0, frame='robotics_lab'):
     message.header.frame_id = frame
     message.point.x = x
     message.point.y = y
+    return message
+
+
+def stamped_waypoint(token, x=1.0, y=2.0):
+    message = waypoint(x=x, y=y)
+    message.header.stamp.sec, message.header.stamp.nanosec = token
     return message
 
 
@@ -75,9 +82,28 @@ def test_refreshed_duplicates_coalesce_and_reached_coordinate_is_accepted_again(
     WaypointController._control_step(controller)
     assert not controller.waypoint_queue
 
-    # Duplicate suppression is queue-local, so a later mission may reuse a
-    # coordinate after the control step removes the reached target.
     receive(controller, waypoint())
+    assert list(controller.waypoint_queue) == [(1.0, 2.0)]
+
+
+def test_reached_ack_echoes_token_and_delayed_refresh_cannot_requeue():
+    controller = make_controller(control_mode='twist')
+    token = (123, 456)
+    receive(controller, stamped_waypoint(token))
+    controller.goal_tolerance_m = 0.1
+    controller._lookup_pose_or_stop = lambda: SimpleNamespace(
+        x=1.0, y=2.0, yaw=0.0
+    )
+    controller.publish_stop = lambda: None
+    WaypointController._control_step(controller)
+    acknowledgement = controller.waypoint_reached_publisher.messages[-1]
+    assert (
+        acknowledgement.header.stamp.sec,
+        acknowledgement.header.stamp.nanosec,
+    ) == token
+    receive(controller, stamped_waypoint(token))
+    assert not controller.waypoint_queue
+    receive(controller, stamped_waypoint((123, 457)))
     assert list(controller.waypoint_queue) == [(1.0, 2.0)]
 
 

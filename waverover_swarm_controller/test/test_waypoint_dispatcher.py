@@ -24,7 +24,7 @@ def test_dispatcher_keeps_one_active_and_replaces_only_pending(
                for state in dispatcher.states.values())
 
 
-def test_reached_waypoint_waits_for_handoff_delay(example_config, snapshot):
+def test_only_matching_acknowledgement_hands_off(example_config, snapshot):
     config = replace(
         example_config.waypoint_dispatch,
         reached_distance_m=0.2,
@@ -36,9 +36,18 @@ def test_reached_waypoint_waits_for_handoff_delay(example_config, snapshot):
     dispatcher.tick(snapshot, 10.0, commands_enabled=True)
     dispatcher.update_pending({key: (2.0, 0.0) for key in snapshot.robots})
 
-    assert dispatcher.tick(snapshot, 10.1, commands_enabled=True) == []
-    assert dispatcher.tick(snapshot, 10.24, commands_enabled=True) == []
-    actions = dispatcher.tick(snapshot, 10.26, commands_enabled=True)
+    assert dispatcher.tick(snapshot, 10.26, commands_enabled=True) == []
+    state = dispatcher.states['robot_2']
+    assert dispatcher.acknowledge(
+        'robot_2', 'wrong', state.active_token, state.active_waypoint,
+        10.27, snapshot.frame_id,
+    ) == []
+    actions = []
+    for robot_id, state in dispatcher.states.items():
+        actions.extend(dispatcher.acknowledge(
+            robot_id, snapshot.frame_id, state.active_token,
+            state.active_waypoint, 10.28, snapshot.frame_id,
+        ))
     assert len(actions) == 3
     assert all(action.point == (2.0, 0.0) for action in actions)
 
@@ -92,7 +101,6 @@ def test_refresh_republishes_active_without_replacing_it_or_resetting_state(
         assert state.pending_waypoint == (3.0, 3.0)
         assert state.active_published_at == 10.0
         assert state.last_published_at == 11.0
-        assert state.reached_since == 10.5
         assert state.refresh_count == 1
 
 

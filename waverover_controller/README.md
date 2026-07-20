@@ -23,6 +23,13 @@ first valid pose, stops again when pose receipt exceeds
 The freshness timeout is based on local monotonic receipt time, not on the
 message timestamp, so unsynchronized laptop/rover wall clocks are safe.
 
+The waypoint `header.stamp` is the logical command token. When a waypoint is
+removed at `goal_tolerance_m`, the controller publishes a reliable
+`PointStamped` acknowledgement on `/waverover_<ID>/waypoint_reached`, echoing
+the original frame, stamp, and coordinates. Recently reached tokens are kept
+in a bounded cache, so delayed PC refreshes cannot re-enter the FIFO; the same
+coordinate with a genuinely new stamp remains eligible after reach.
+
 The preferred onboard command starts the bridge and appropriate pose stack as
 well:
 

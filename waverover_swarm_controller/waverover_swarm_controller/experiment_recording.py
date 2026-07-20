@@ -10,7 +10,7 @@ import yaml
 from waverover.stack_config import mcs_pose_topic, robot_namespace, robot_topic
 
 
-MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 2
 RUN_EVENT_SCHEMA_VERSION = 1
 
 
@@ -54,6 +54,7 @@ def recording_topics(robot_ids, stack_config, profile='core'):
         '/waverover_swarm/run_event',
         '/waverover_swarm/synthetic/metadata',
         '/waverover_swarm/controller_telemetry',
+        '/waverover_swarm/target_state',
         '/waverover_swarm/diagnostics',
         '/waverover_swarm/markers',
         '/parameter_events',
@@ -69,6 +70,7 @@ def recording_topics(robot_ids, stack_config, profile='core'):
             '/waverover_swarm/synthetic/motion/' + namespace,
             '/waverover_swarm/predicted_path/' + namespace,
             robot_topic(stack_config, 'waypoints', robot_id),
+            robot_topic(stack_config, 'waypoint_reached', robot_id),
             robot_topic(stack_config, 'end_trial', robot_id),
             robot_topic(stack_config, 'cmd_vel', robot_id),
         })
@@ -85,6 +87,10 @@ def recording_topics(robot_ids, stack_config, profile='core'):
 
 def qos_overrides(robot_ids, stack_config):
     values = {
+        '/waverover_swarm/target_state': {
+            'history': 'keep_last', 'depth': 10,
+            'reliability': 'reliable', 'durability': 'transient_local',
+        },
         '/waverover_swarm/synthetic/metadata': {
             'history': 'keep_last',
             'depth': 1,

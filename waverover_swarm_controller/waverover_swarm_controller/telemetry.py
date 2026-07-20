@@ -10,7 +10,7 @@ from .metrics import (
 )
 
 
-CONTROLLER_TELEMETRY_SCHEMA_VERSION = 3
+CONTROLLER_TELEMETRY_SCHEMA_VERSION = 4
 
 
 def _point(point):
@@ -85,7 +85,7 @@ def build_controller_telemetry(
         target_id: {
             'position': _point(target.position),
             'weight': float(target.weight),
-            'is_main': bool(target.is_main),
+            'is_priority': bool(target.is_priority),
         }
         for target_id, target in (
             snapshot.targets.items() if snapshot is not None else []
@@ -110,6 +110,33 @@ def build_controller_telemetry(
             if snapshot is not None and snapshot.station is not None else None
         ),
         'targets': targets,
+        'priority_target_id': (
+            snapshot.priority_target_id if snapshot is not None else None
+        ),
+        'target_epoch': snapshot.target_epoch if snapshot is not None else None,
+        'target_epoch_start_monotonic_sec': (
+            snapshot.target_epoch_started_at if snapshot is not None else None
+        ),
+        'target_epoch_elapsed_sec': (
+            max(0.0, snapshot.created_at - snapshot.target_epoch_started_at)
+            if snapshot is not None else None
+        ),
+        'next_target_switch_monotonic_sec': (
+            snapshot.next_target_switch_at
+            if snapshot is not None else None
+        ),
+        'target_switch_remaining_sec': (
+            max(0.0, snapshot.next_target_switch_at - snapshot.created_at)
+            if snapshot is not None
+            and snapshot.next_target_switch_at is not None else None
+        ),
+        'target_selection_seed': (
+            snapshot.target_selection_seed if snapshot is not None
+            else int(config.target_dynamics.seed)
+        ),
+        'target_switch_reason': (
+            snapshot.target_switch_reason if snapshot is not None else None
+        ),
         'setpoints': (
             {
                 robot_id: _point(point)
@@ -150,6 +177,33 @@ def build_controller_telemetry(
                 'active_waypoint_overdue': bool(
                     values['active_waypoint_overdue']
                 ),
+                'active_token': values.get('active_token'),
+                'last_acknowledged_token': values.get(
+                    'last_acknowledged_token'
+                ),
+                'last_acknowledged_waypoint': (
+                    None if values.get('last_acknowledged_waypoint') is None
+                    else _point(values['last_acknowledged_waypoint'])
+                ),
+                'acknowledgement_count': int(values.get(
+                    'acknowledgement_count', 0
+                )),
+                'last_acknowledgement_monotonic_sec': values.get(
+                    'last_acknowledgement_monotonic_sec'
+                ),
+                'last_acknowledgement_age_sec': values.get(
+                    'last_acknowledgement_age_sec'
+                ),
+                'unmatched_acknowledgement_count': int(values.get(
+                    'unmatched_acknowledgement_count', 0
+                )),
+                'handoff_cause': values.get('handoff_cause', 'none'),
+                'active_target_epoch': int(values.get(
+                    'active_target_epoch', 0
+                )),
+                'pending_target_epoch': int(values.get(
+                    'pending_target_epoch', 0
+                )),
             }
             for robot_id, values in sorted(dispatch_observability.items())
         },

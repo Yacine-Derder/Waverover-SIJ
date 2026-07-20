@@ -29,11 +29,11 @@ def test_figure_has_targets_labels_and_experiment_context():
 
     assert axes.get_xlabel() == 'x (m)'
     assert axes.get_ylabel() == 'y (m)'
-    assert len(axes.collections) >= 3  # main, secondary, and station
+    assert len(axes.collections) >= 2  # neutral targets and station
     assert len(axes.patches) == 3  # geofence and two range circles
     annotation_text = {text.get_text() for text in axes.texts}
-    assert any('target_main' in text for text in annotation_text)
-    assert any('target_secondary_1' in text for text in annotation_text)
+    assert any('target_0' in text for text in annotation_text)
+    assert any('target_1' in text for text in annotation_text)
     assert experiment.station.station_id in annotation_text
     plt.close(figure)
 

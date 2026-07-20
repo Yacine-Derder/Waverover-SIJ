@@ -28,17 +28,35 @@ class RobotState:
         return (self.x, self.y)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class TargetState:
     target_id: str
     x: float
     y: float
     weight: float
-    is_main: bool = False
+    is_priority: bool = False
+
+    def __init__(
+        self, target_id, x, y, weight, is_priority=False, **legacy
+    ):
+        if 'is_main' in legacy:
+            is_priority = legacy.pop('is_main')
+        if legacy:
+            raise TypeError('Unexpected TargetState fields: %s' % sorted(legacy))
+        object.__setattr__(self, 'target_id', str(target_id))
+        object.__setattr__(self, 'x', float(x))
+        object.__setattr__(self, 'y', float(y))
+        object.__setattr__(self, 'weight', float(weight))
+        object.__setattr__(self, 'is_priority', bool(is_priority))
 
     @property
     def position(self):
         return (self.x, self.y)
+
+    @property
+    def is_main(self):
+        """Legacy reader compatibility; new runtime code uses is_priority."""
+        return self.is_priority
 
 
 @dataclass(frozen=True)
@@ -59,6 +77,12 @@ class SwarmSnapshot:
     targets: Mapping[str, TargetState]
     station: StationState
     created_at: float
+    priority_target_id: Optional[str] = None
+    target_epoch: int = 0
+    target_epoch_started_at: float = 0.0
+    target_switch_reason: str = 'legacy_static'
+    target_selection_seed: Optional[int] = None
+    next_target_switch_at: Optional[float] = None
 
     def __post_init__(self):
         object.__setattr__(self, 'robots', _frozen_mapping(self.robots))
@@ -75,6 +99,7 @@ class ControllerResult:
     solve_duration_sec: float = 0.0
     diagnostic: str = ''
     created_at: float = 0.0
+    target_epoch: int = 0
 
     def __post_init__(self):
         object.__setattr__(self, 'setpoints', _frozen_mapping(self.setpoints))

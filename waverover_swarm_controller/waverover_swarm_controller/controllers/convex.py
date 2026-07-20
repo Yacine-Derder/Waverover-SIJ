@@ -148,7 +148,7 @@ class ConvexController(SwarmController):
                     positions[step, robot_index] - positions[step - 1, robot_index]
                 ) <= self.config.controller.mpc_max_step_m)
                 target = assignments[robot_id]
-                weight = 1000.0 if target.is_main else max(target.weight, 1.0)
+                weight = max(target.weight, 1e-9)
                 objective += weight * cp.norm(
                     positions[step, robot_index] - np.asarray(target.position)
                 )
@@ -224,4 +224,5 @@ class ConvexController(SwarmController):
             solve_duration_sec=time.monotonic() - started,
             diagnostic='Alternating assignment port with connectivity-safe output projection.',
             created_at=time.monotonic(),
+            target_epoch=snapshot.target_epoch,
         )

@@ -58,6 +58,7 @@ def _launch_waypoint_controller(context):
         'robot_frame': robot_frame(STACK_DEFAULTS, 'base', robot_name),
         'cmd_vel_topic': topics['cmd_vel'],
         'waypoint_topic': topics['waypoints'],
+        'waypoint_reached_topic': topics['waypoint_reached'],
         'end_trial_topic': topics['end_trial'],
         'mcs_pose_topic': selected_mcs_topic,
         'mcs_pose_timeout_sec': ParameterValue(

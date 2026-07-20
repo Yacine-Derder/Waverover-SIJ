@@ -62,6 +62,17 @@ controller:
   deterministic_seed: 42
   distributed_update_semantics: jacobi
 
+and target dynamics:
+
+target_dynamics:
+  mode: random_priority
+  switch_period_sec: 10.0
+  priority_weight: 10.0
+  background_weight: 1.0
+  seed: 2026
+  initial_priority_target_id: null
+  avoid_immediate_repeat: true
+
 Supported algorithms:
 
   heuristic
@@ -156,7 +167,8 @@ ros2 launch waverover_swarm_controller swarm_controller.launch.py   config_file:
 With fresh synchronized poses and a valid result, one active waypoint is
 published automatically per rover and refreshed every 1 second. Pending
 setpoints continue to be computed, but a new waypoint is not handed off until
-MCS reports that the active waypoint was reached. After 10 seconds the active
+the rover echoes its command stamp on `/waverover_<ID>/waypoint_reached`.
+Listen with `ros2 topic echo /waverover_131/waypoint_reached`. After 10 seconds the active
 waypoint is reported overdue without faulting or stopping refresh. The onboard
 controller coalesces identical refresh messages. Stop with Ctrl-C for graceful
 end_trial cleanup.

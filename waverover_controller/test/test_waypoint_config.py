@@ -42,6 +42,7 @@ def test_controller_defaults_are_central_and_robot_derived():
     assert config.robot_frame == 'waverover_30/base_footprint'
     assert config.cmd_vel_topic == 'cmd_vel'
     assert config.waypoint_topic == 'waypoints'
+    assert config.waypoint_reached_topic == 'waypoint_reached'
     assert config.end_trial_topic == 'end_trial'
 
 
@@ -72,6 +73,7 @@ def test_mcs_launch_selection_uses_external_pose_and_lab_frame():
     )
     assert parameters['mcs_pose_timeout_sec'] == pytest.approx(0.5)
     assert parameters['end_trial_topic'] == 'end_trial'
+    assert parameters['waypoint_reached_topic'] == 'waypoint_reached'
 
 
 def test_slam_launch_selection_keeps_namespaced_tf_frames():

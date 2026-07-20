@@ -44,6 +44,7 @@ class CentralizedMpcController(ConvexController):
                 + result.diagnostic
             ),
             created_at=result.created_at,
+            target_epoch=snapshot.target_epoch,
         )
 
     @property

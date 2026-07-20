@@ -189,6 +189,7 @@ class DistributedMpcController(SwarmController):
                 solver_status='no_robots',
                 solve_duration_sec=time.monotonic() - started,
                 created_at=time.monotonic(),
+                target_epoch=snapshot.target_epoch,
             )
         if snapshot.station is None:
             return ControllerResult(
@@ -197,6 +198,7 @@ class DistributedMpcController(SwarmController):
                 solve_duration_sec=time.monotonic() - started,
                 diagnostic='Distributed MPC requires a station.',
                 created_at=time.monotonic(),
+                target_epoch=snapshot.target_epoch,
             )
         if not snapshot.targets:
             stationary = {
@@ -208,6 +210,7 @@ class DistributedMpcController(SwarmController):
                 solver_status='no_targets',
                 solve_duration_sec=time.monotonic() - started,
                 created_at=time.monotonic(),
+                target_epoch=snapshot.target_epoch,
             )
         edges = select_fiedler_edges(
             snapshot, self.config.communication.maximum_range_m
@@ -305,4 +308,5 @@ class DistributedMpcController(SwarmController):
                 )
             ),
             created_at=time.monotonic(),
+            target_epoch=snapshot.target_epoch,
         )

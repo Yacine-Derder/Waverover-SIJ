@@ -104,7 +104,12 @@ class PoseAggregator:
         )
         return True
 
-    def snapshot(self, targets, station, now=None):
+    def snapshot(
+        self, targets, station, now=None, priority_target_id=None,
+        target_epoch=0, target_epoch_started_at=0.0,
+        target_switch_reason='legacy_static', target_selection_seed=None,
+        next_target_switch_at=None,
+    ):
         current_time = self.monotonic_clock() if now is None else float(now)
         missing = [value for value in self.robot_ids if value not in self.latest]
         if missing:
@@ -135,6 +140,12 @@ class PoseAggregator:
             targets={target.target_id: target for target in targets},
             station=station,
             created_at=current_time,
+            priority_target_id=priority_target_id,
+            target_epoch=int(target_epoch),
+            target_epoch_started_at=float(target_epoch_started_at),
+            target_switch_reason=str(target_switch_reason),
+            target_selection_seed=target_selection_seed,
+            next_target_switch_at=next_target_switch_at,
         )
 
     def pose_ages(self, now=None):

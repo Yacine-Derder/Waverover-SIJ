@@ -171,6 +171,239 @@ colcon build --symlink-install --packages-select \
 source install/setup.bash
 ```
 
+## End-to-end operator-PC test run
+
+The following commands assume the repository is
+`/home/derder/ros2_ws/src` and the workspace is
+`/home/derder/ros2_ws`. Use one shell per numbered terminal. Every shell must
+use the same ROS domain and middleware settings as the MCS bridge and, during a
+physical test, the rovers.
+
+### 1. Build and create a local test configuration
+
+Run once after pulling a new revision:
+
+```bash
+cd /home/derder/ros2_ws
+source /opt/ros/jazzy/setup.bash
+
+rosdep install --from-paths src --ignore-src -r -y
+colcon build --symlink-install --packages-select \
+  waverover waverover_swarm_controller
+```
+
+Keep experiment-specific coordinates outside the Git checkout:
+
+```bash
+mkdir -p /home/derder/waverover_experiments
+cp /home/derder/ros2_ws/src/waverover_swarm_controller/config/smoke_test_6.yaml \
+  /home/derder/waverover_experiments/pc_test.yaml
+cp /home/derder/ros2_ws/src/waverover_swarm_controller/config/targets_smoke_6.yaml \
+  /home/derder/waverover_experiments/targets_smoke_6.yaml
+
+nano /home/derder/waverover_experiments/pc_test.yaml
+```
+
+At minimum, verify `robot_ids`, `station.position`,
+`communication.*_range_m`, `safety.minimum_separation_m`, and the complete
+`safety.geofence`. Edit target coordinates and weights in
+`/home/derder/waverover_experiments/targets_smoke_6.yaml`. The relative
+`targets_file: targets_smoke_6.yaml` entry remains valid because both copied
+files are in the same directory.
+
+Use this setup block at the start of every terminal:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source /home/derder/ros2_ws/install/setup.bash
+export ROS_DOMAIN_ID=42
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET
+```
+
+Change these networking values if the MCS bridge and rover fleet use different
+ones.
+
+### 2. Fake-MCS computation test (no waypoint publication)
+
+Terminal 1 publishes the fake poses:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source /home/derder/ros2_ws/install/setup.bash
+export ROS_DOMAIN_ID=42
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET
+
+ros2 launch waverover_swarm_controller synthetic_mcs.launch.py \
+  config_file:=/home/derder/waverover_experiments/pc_test.yaml \
+  rate_hz:=20.0 \
+  radius_m:=0.75
+```
+
+Terminal 2 starts the coordinator in dry-run:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source /home/derder/ros2_ws/install/setup.bash
+export ROS_DOMAIN_ID=42
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET
+
+ros2 launch waverover_swarm_controller swarm_controller.launch.py \
+  config_file:=/home/derder/waverover_experiments/pc_test.yaml \
+  algorithm:=heuristic \
+  dry_run:=true
+```
+
+Terminal 3 verifies input and generated results:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source /home/derder/ros2_ws/install/setup.bash
+export ROS_DOMAIN_ID=42
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET
+
+ros2 topic hz /macortex_bridge/waverover_131/pose
+```
+
+Stop `topic hz` with Ctrl-C, then inspect either diagnostics or the
+machine-readable result:
+
+```bash
+ros2 topic echo /waverover_swarm/diagnostics
+ros2 topic echo /waverover_swarm/controller_telemetry
+```
+
+Only run one blocking `ros2 topic echo` command at a time. A healthy cycle
+reports fresh poses, `controller_result_state=valid`, a valid solver status,
+and per-rover `pending_<ID>` setpoints. Dry-run deliberately publishes no
+messages on `/waverover_<ID>/waypoints` and cannot be armed.
+
+The `algorithm` launch value may be `heuristic`,
+`heuristic_decentralized`, `convex`, `mpc_centralized`, or
+`mpc_distributed`. Stop and relaunch the coordinator to change algorithms.
+The launch argument overrides `controller.algorithm` in the YAML.
+
+### 3. Fake-MCS waypoint-publication test with rovers off
+
+Keep Terminal 1 running. Stop the dry-run coordinator in Terminal 2 and
+relaunch it with command publication enabled:
+
+```bash
+ros2 launch waverover_swarm_controller swarm_controller.launch.py \
+  config_file:=/home/derder/waverover_experiments/pc_test.yaml \
+  algorithm:=heuristic \
+  dry_run:=false
+```
+
+Before arming, use Terminal 3 to watch a rover's output:
+
+```bash
+ros2 topic echo /waverover_131/waypoints
+```
+
+In Terminal 4, arm the coordinator:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source /home/derder/ros2_ws/install/setup.bash
+export ROS_DOMAIN_ID=42
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET
+
+ros2 service call /waverover_swarm/arm \
+  std_srvs/srv/SetBool "{data: true}"
+```
+
+A successful call publishes one active waypoint per configured rover. Inspect
+other rover topics by replacing `131`. Disarm when finished:
+
+```bash
+ros2 service call /waverover_swarm/arm \
+  std_srvs/srv/SetBool "{data: false}"
+```
+
+With stationary fake poses or real rovers that are turned off, the dispatcher
+does not publish a stream of new waypoints. It keeps recomputing replaceable
+pending setpoints, visible in diagnostics and telemetry, but waits for MCS to
+show that the active waypoint was reached before handing off the next one.
+After `waypoint_dispatch.maximum_active_time_sec` (10 seconds in the supplied
+configuration), it faults and sends `end_trial` to the rover IDs it commanded.
+Increase this timeout only for a deliberate stationary observation test; do not
+treat that change as a physical-motion safety setting.
+
+### 4. Real-MCS test with rovers turned off
+
+Do not run `synthetic_mcs`. The coordinator has no fake/real selector: both
+sources publish the same canonical MCS topics, so running the synthetic and real
+publishers together would mix two pose sources and invalidate the test.
+
+First verify the real bridge in Terminal 1:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source /home/derder/ros2_ws/install/setup.bash
+export ROS_DOMAIN_ID=42
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET
+
+ros2 topic list | sort
+ros2 topic info /macortex_bridge/waverover_131/pose --verbose
+ros2 topic echo /macortex_bridge/waverover_131/pose --once
+```
+
+Repeat the last two commands for IDs 132 through 136. Every pose must have
+`header.frame_id: robotics_lab`, finite coordinates, a valid quaternion, and
+a sufficiently fresh publication rate. The configuration must list exactly the
+rover IDs supplied by the MCS; arming requires a fresh, synchronized pose for
+every listed ID.
+
+Start with the dry-run coordinator in Terminal 2:
+
+```bash
+ros2 launch waverover_swarm_controller swarm_controller.launch.py \
+  config_file:=/home/derder/waverover_experiments/pc_test.yaml \
+  algorithm:=heuristic \
+  dry_run:=true
+```
+
+Inspect diagnostics and telemetry in Terminal 3. Verify the actual MCS
+coordinates against the configured station, targets, communication ranges,
+geofence, and minimum separation. If the dry-run remains valid, stop Terminal
+2, relaunch with `dry_run:=false`, start a waypoint echo in Terminal 3, and
+arm from Terminal 4 using the commands in the preceding section. Rover
+processes and waypoint subscribers do not need to be running for the ROS
+publisher and a PC-side `ros2 topic echo` subscriber to observe the generated
+waypoint.
+
+For a non-publishing verification, remain in `dry_run:=true` and inspect
+`pending_<ID>` in diagnostics or `setpoints` in controller telemetry. This
+is the preferred first test with real MCS data.
+
+### Configuration map
+
+| What to change | Location |
+| --- | --- |
+| Participating rovers | `robot_ids` in the experiment YAML |
+| Allowed pose age and inter-rover timestamp skew | `pose.timeout_sec`, `pose.maximum_snapshot_skew_sec` |
+| Station coordinates | `station.position` |
+| Target file | `targets_file` in the experiment YAML |
+| Target coordinates, weights, and main target | the referenced targets YAML |
+| Rover motion model | `vehicle` |
+| Control period, MPC horizon/step, seed, distributed semantics | `controller` |
+| Handoff tolerance/delay and active timeout | `waypoint_dispatch` |
+| Link ranges | `communication` |
+| Minimum separation and allowed floor area | `safety` |
+| Fake-pose behavior only | `synthetic_mcs` |
+| Runtime controller selection | launch argument `algorithm:=...` |
+| Command suppression/publication | launch argument `dry_run:=true/false` |
+
+The `recording.pose_source` and `recording.start_synthetic` fields apply to
+the `run_experiment` supervisor. They do not select the pose source for a
+standalone `swarm_controller.launch.py` process.
+
 ## Dry-run, arming, and topics
 
 Always begin in dry-run:

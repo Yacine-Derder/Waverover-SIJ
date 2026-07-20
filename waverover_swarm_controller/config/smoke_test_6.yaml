@@ -38,7 +38,8 @@ controller:
 waypoint_dispatch:
   reached_distance_m: 0.05
   handoff_delay_sec: 0.15
-  maximum_active_time_sec: 10.0
+  refresh_period_sec: 1.0
+  active_waypoint_warning_sec: 10.0
 
 communication:
   # Illustrative laboratory defaults; verify against measured radio behavior.

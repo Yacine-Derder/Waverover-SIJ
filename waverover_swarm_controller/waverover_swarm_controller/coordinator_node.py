@@ -1,6 +1,5 @@
 """ROS boundary for the operator-PC swarm coordinator."""
 
-from dataclasses import replace
 import signal
 import time
 
@@ -13,11 +12,10 @@ from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import Empty, String
-from std_srvs.srv import SetBool
 from visualization_msgs.msg import Marker, MarkerArray
 from waverover.stack_config import robot_namespace
 
-from .config import ConfigError, load_experiment, SUPPORTED_ALGORITHMS
+from .config import ConfigError, load_experiment
 from .controllers import controller_from_config
 from .controllers.base import ControllerUnavailableError
 from .metrics import algebraic_connectivity, minimum_pairwise_distance
@@ -56,11 +54,10 @@ class SwarmCoordinator(Node):
             self.config.pose.maximum_snapshot_skew_sec,
             logger=self.get_logger(),
         )
-        self.armed = False
         self.latest_result = None
         self.latest_rejected_result = None
         self.latest_snapshot = None
-        self.latest_stop_reason = 'startup: dry-run, disarmed'
+        self.latest_stop_reason = 'startup: awaiting fresh synchronized poses'
         self.latest_handoff = 'none'
         self._cleanup_complete = False
         self._end_sent_for_stop = False
@@ -123,51 +120,28 @@ class SwarmCoordinator(Node):
             )
             for robot_id in self.config.robot_ids
         }
-        self.arm_service = self.create_service(SetBool, 'arm', self._arm_callback)
         self.add_on_set_parameters_callback(self._parameters_callback)
         self.timer = self.create_timer(
             self.config.controller.control_period_sec,
             self._control_cycle,
         )
         self.get_logger().warn(
-            'PC-only coordinator algorithm=%s dry_run=%s armed=false. '
-            'No rover commands are being sent.'
-            % (self.config.controller.algorithm, self.config.safety.dry_run)
+            'PC-only coordinator algorithm=%s dry_run=%s. %s'
+            % (
+                self.config.controller.algorithm,
+                self.config.safety.dry_run,
+                'Commands are suppressed.' if self.config.safety.dry_run else
+                'Validated waypoints will dispatch automatically.',
+            )
         )
 
     def _parameters_callback(self, parameters):
         for parameter in parameters:
-            if parameter.name in ('config_file', 'dry_run'):
+            if parameter.name in ('config_file', 'dry_run', 'algorithm'):
                 return SetParametersResult(
                     successful=False,
                     reason='%s changes require a coordinator relaunch.'
                     % parameter.name,
-                )
-            if parameter.name == 'algorithm':
-                if self.armed:
-                    return SetParametersResult(
-                        successful=False,
-                        reason='Disarm before changing algorithms.',
-                    )
-                algorithm = str(parameter.value).strip().lower()
-                if algorithm not in SUPPORTED_ALGORITHMS:
-                    return SetParametersResult(
-                        successful=False,
-                        reason='Unknown swarm algorithm %s.' % algorithm,
-                    )
-                selected = replace(
-                    self.config,
-                    controller=replace(
-                        self.config.controller,
-                        algorithm=algorithm,
-                    ),
-                )
-                self.config = selected
-                self.controller = controller_from_config(selected)
-                self.latest_result = None
-                self.latest_rejected_result = None
-                self.latest_stop_reason = (
-                    'algorithm changed while disarmed; awaiting valid cycle'
                 )
         return SetParametersResult(successful=True)
 
@@ -189,65 +163,12 @@ class SwarmCoordinator(Node):
         self.latest_rejected_result = None
         return result
 
-    def _arm_callback(self, request, response):
-        if not request.data:
-            self._stop_trial('explicit disarm')
-            response.success = True
-            response.message = 'Disarmed; end-trial sent to commanded rovers.'
-            return response
-        if self.armed:
-            response.success = True
-            response.message = 'Already armed.'
-            return response
-        if self.config.safety.dry_run:
-            response.success = False
-            response.message = 'Cannot arm while dry_run is true.'
-            return response
-        available, reason = self.controller.availability()
-        if not available:
-            response.success = False
-            response.message = reason
-            return response
-        snapshot = None
-        try:
-            snapshot = self._snapshot()
-            result = self._compute_valid_result(snapshot)
-        except (
-            SnapshotUnavailableError,
-            SafetyViolation,
-            ControllerUnavailableError,
-            RuntimeError,
-            ValueError,
-        ) as error:
-            response.success = False
-            response.message = 'Arming rejected: %s' % error
-            self._publish_controller_telemetry(
-                snapshot,
-                self.latest_rejected_result,
-                'rejected' if self.latest_rejected_result else 'faulted',
-            )
-            return response
-        self.dispatcher.rearm()
-        self.dispatcher.update_pending(result.setpoints)
-        self.latest_snapshot = snapshot
-        self.latest_result = result
-        self.armed = True
-        self._end_sent_for_stop = False
-        self.latest_stop_reason = ''
-        self._publish_controller_telemetry(snapshot, result, 'valid')
-        self._dispatch(snapshot)
-        response.success = True
-        response.message = 'Armed with validated %s result.' % (
-            self.config.controller.algorithm
-        )
-        return response
-
     def _control_cycle(self):
         try:
             snapshot = self._snapshot()
         except SnapshotUnavailableError as error:
             self.latest_stop_reason = str(error)
-            if self.armed:
+            if self.dispatcher.commanded_robot_ids:
                 self._stop_trial('stale/incomplete required pose: %s' % error)
             self._publish_controller_telemetry(None, None, 'faulted')
             self._publish_diagnostics()
@@ -261,7 +182,7 @@ class SwarmCoordinator(Node):
             ValueError,
         ) as error:
             self.latest_stop_reason = str(error)
-            if self.armed:
+            if self.dispatcher.commanded_robot_ids:
                 self._stop_trial('invalid controller cycle: %s' % error)
             rejected = self.latest_rejected_result
             self._publish_controller_telemetry(
@@ -271,15 +192,15 @@ class SwarmCoordinator(Node):
             )
             self._publish_diagnostics()
             return
-        # Clear transient startup/missing-pose warnings after a valid cycle.
-        # Preserve faults from an armed trial until explicit rearming.
+        # Clear transient pre-dispatch warnings after a valid cycle. Once any
+        # rover has been commanded, faults stay latched until process restart.
         if not self.dispatcher.faulted:
             self.latest_stop_reason = ''
 
         self.latest_snapshot = snapshot
         self.latest_result = result
-        self.dispatcher.update_pending(result.setpoints)
-        if self.armed:
+        if not self.dispatcher.faulted:
+            self.dispatcher.update_pending(result.setpoints)
             self._dispatch(snapshot)
         self._publish_controller_telemetry(snapshot, result, 'valid')
         self._publish_visualization(snapshot, result)
@@ -289,7 +210,7 @@ class SwarmCoordinator(Node):
         actions = self.dispatcher.tick(
             snapshot,
             time.monotonic(),
-            commands_enabled=self.armed and not self.config.safety.dry_run,
+            commands_enabled=not self.config.safety.dry_run,
         )
         for action in actions:
             if action.kind == 'fault':
@@ -301,19 +222,18 @@ class SwarmCoordinator(Node):
             message.point.x = action.point[0]
             message.point.y = action.point[1]
             self.waypoint_publishers[action.robot_id].publish(message)
-            self.latest_handoff = 'robot=%s point=(%.3f, %.3f)' % (
-                action.robot_id, action.point[0], action.point[1]
+            self.latest_handoff = '%s robot=%s point=(%.3f, %.3f)' % (
+                action.kind, action.robot_id, action.point[0], action.point[1]
             )
             self.get_logger().info(
-                'Waypoint handoff robot=%s x=%.3f y=%.3f.'
-                % (action.robot_id, action.point[0], action.point[1])
+                'Waypoint %s robot=%s x=%.3f y=%.3f.'
+                % (action.kind, action.robot_id, action.point[0], action.point[1])
             )
 
     def _stop_trial(self, reason):
-        self.armed = False
         self.latest_stop_reason = str(reason)
         self.dispatcher.mark_fault(reason)
-        if not self._end_sent_for_stop:
+        if not self.config.safety.dry_run and not self._end_sent_for_stop:
             for robot_id in self.dispatcher.commanded_robot_ids:
                 self.end_trial_publishers[robot_id].publish(Empty())
             self._end_sent_for_stop = True
@@ -330,6 +250,7 @@ class SwarmCoordinator(Node):
     def _publish_diagnostics(self):
         now = time.monotonic()
         ages = self.aggregator.pose_ages(now)
+        dispatch_observability = self.dispatcher.observability(now)
         diagnostic_result = self.latest_rejected_result or self.latest_result
         result_state = (
             'rejected' if self.latest_rejected_result is not None
@@ -338,7 +259,10 @@ class SwarmCoordinator(Node):
         values = {
             'algorithm': self.config.controller.algorithm,
             'dry_run': str(self.config.safety.dry_run),
-            'armed': str(self.armed),
+            'dispatch_state': (
+                'dry_run' if self.config.safety.dry_run else
+                ('faulted' if self.dispatcher.faulted else 'automatic')
+            ),
             'controller_result_state': result_state,
             'solver_status': (
                 diagnostic_result.solver_status if diagnostic_result else 'none'
@@ -362,6 +286,15 @@ class SwarmCoordinator(Node):
             state = self.dispatcher.states[robot_id]
             values['active_' + robot_id] = str(state.active_waypoint)
             values['pending_' + robot_id] = str(state.pending_waypoint)
+            dispatch = dispatch_observability[robot_id]
+            for field in (
+                'active_waypoint_age_sec',
+                'last_publication_monotonic_sec',
+                'last_publication_age_sec',
+                'refresh_count',
+                'active_waypoint_overdue',
+            ):
+                values[field + '_' + robot_id] = str(dispatch[field])
         if self.latest_snapshot is not None:
             robot_points = [
                 state.position for state in self.latest_snapshot.robots.values()
@@ -383,11 +316,18 @@ class SwarmCoordinator(Node):
         status = DiagnosticStatus()
         status.name = 'waverover_swarm/controller'
         status.hardware_id = 'operator_pc'
-        status.level = (
-            DiagnosticStatus.OK if not self.latest_stop_reason
-            else DiagnosticStatus.WARN
+        overdue = [
+            robot_id for robot_id, dispatch in dispatch_observability.items()
+            if dispatch['active_waypoint_overdue']
+        ]
+        status.level = DiagnosticStatus.WARN if (
+            self.latest_stop_reason or overdue
+        ) else DiagnosticStatus.OK
+        status.message = (
+            self.latest_stop_reason or
+            ('active waypoint overdue: ' + ','.join(overdue)
+             if overdue else 'cycle valid')
         )
-        status.message = self.latest_stop_reason or 'cycle valid'
         status.values = [
             KeyValue(key=key, value=str(value))
             for key, value in sorted(values.items())
@@ -410,17 +350,19 @@ class SwarmCoordinator(Node):
                 robot_id: state.pending_waypoint
                 for robot_id, state in self.dispatcher.states.items()
             }
+            dispatch_observability = self.dispatcher.observability(now)
             payload = build_controller_telemetry(
                 self.config,
                 snapshot,
                 result,
                 result_state,
                 self.get_clock().now().to_msg(),
-                self.armed,
+                not self.config.safety.dry_run and not self.dispatcher.faulted,
                 self.latest_stop_reason,
                 pose_ages,
                 active,
                 pending,
+                dispatch_observability,
                 self.latest_handoff,
             )
             message = String()

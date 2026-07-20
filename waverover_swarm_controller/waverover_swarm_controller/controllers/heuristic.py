@@ -9,6 +9,9 @@ from ..models import ControllerResult
 from .base import ControllerUnavailableError, SwarmController
 
 
+STATION_ENDPOINT_TOLERANCE_M = 1e-9
+
+
 class HeuristicController(SwarmController):
     def availability(self):
         try:
@@ -93,10 +96,29 @@ class HeuristicController(SwarmController):
         distance = np.linalg.norm(delta)
         unit = delta / distance if distance > 1e-12 else np.zeros(2)
         covered = max(0.0, distance - observation)
-        return [
+        positions = [
             station + ((index + 1.0) / count) * covered * unit
             for index in range(count)
         ]
+        # The station is already a fixed graph node, not a rover relay slot.
+        return [
+            point for point in positions
+            if np.linalg.norm(point - station) > STATION_ENDPOINT_TOLERANCE_M
+        ]
+
+    @staticmethod
+    def _validate_nonstation_setpoints(snapshot, setpoints):
+        station = np.asarray(snapshot.station.position, dtype=float)
+        duplicates = [
+            robot_id for robot_id, point in sorted(setpoints.items())
+            if np.linalg.norm(np.asarray(point, dtype=float) - station)
+            <= STATION_ENDPOINT_TOLERANCE_M
+        ]
+        if duplicates:
+            raise ControllerUnavailableError(
+                'No non-station heuristic position is available for rover(s): '
+                + ', '.join(duplicates) + '.'
+            )
 
     def desired_positions(self, snapshot):
         robot_ids = tuple(sorted(snapshot.robots))
@@ -118,9 +140,11 @@ class HeuristicController(SwarmController):
                     2.0 * self.config.vehicle.turn_radius_m
                 )
                 observation = max(0.0, distance - main_count * usable_range)
-            positions.extend(self._relay_positions(
+            main_positions = self._relay_positions(
                 station, target_position, main_count, observation
-            ))
+            )
+            positions.extend(main_positions)
+            main_count = len(main_positions)
 
         unassigned = len(robot_ids) - main_count
         secondary = [
@@ -142,7 +166,12 @@ class HeuristicController(SwarmController):
         positions.extend(secondary_positions)
 
         from scipy.optimize import linear_sum_assignment
-        output = {robot_id: tuple(station) for robot_id in robot_ids}
+        # Surplus rovers hold their measured positions. The previous station
+        # default duplicated the fixed GCS endpoint as a rover waypoint.
+        output = {
+            robot_id: tuple(snapshot.robots[robot_id].position)
+            for robot_id in robot_ids
+        }
         if positions:
             desired = np.asarray(positions)
             current = np.asarray([
@@ -152,6 +181,7 @@ class HeuristicController(SwarmController):
             rows, columns = linear_sum_assignment(cost)
             for row, column in zip(rows, columns):
                 output[robot_ids[row]] = tuple(float(v) for v in desired[column])
+        self._validate_nonstation_setpoints(snapshot, output)
         return output
 
     def _selected_edges(self, snapshot, setpoints):

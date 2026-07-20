@@ -136,7 +136,8 @@ or:
 
 ros2 topic echo /waverover_swarm/controller_telemetry
 
-Dry-run cannot be armed and publishes nothing on /waverover_<ID>/waypoints.
+Dry-run computes, validates, and records results but publishes nothing on
+/waverover_<ID>/waypoints or /waverover_<ID>/end_trial.
 
 
 6. FAKE-MCS WAYPOINT-PUBLICATION TEST
@@ -144,27 +145,21 @@ Dry-run cannot be armed and publishes nothing on /waverover_<ID>/waypoints.
 
 Keep the standalone synthetic MCS publisher running.
 
-Terminal 2 - relaunch the coordinator:
-
-ros2 launch waverover_swarm_controller swarm_controller.launch.py   config_file:=/home/derder/waverover_experiments/dynamic_heuristic.yaml   algorithm:=heuristic   dry_run:=false
-
-Terminal 3 - listen before arming:
+Terminal 3 - start listening before live launch:
 
 ros2 topic echo /waverover_131/waypoints
 
-Terminal 4 - arm:
+Terminal 2 - relaunch the coordinator (automatic publication):
 
-ros2 service call /waverover_swarm/arm   std_srvs/srv/SetBool "{data: true}"
+ros2 launch waverover_swarm_controller swarm_controller.launch.py   config_file:=/home/derder/waverover_experiments/dynamic_heuristic.yaml   algorithm:=heuristic   dry_run:=false
 
-Disarm:
-
-ros2 service call /waverover_swarm/arm   std_srvs/srv/SetBool "{data: false}"
-
-With stationary rovers, one active waypoint is published per rover. Pending
+With fresh synchronized poses and a valid result, one active waypoint is
+published automatically per rover and refreshed every 1 second. Pending
 setpoints continue to be computed, but a new waypoint is not handed off until
-MCS reports that the active waypoint was reached. The default active timeout is
-10 seconds, after which the coordinator faults and publishes end_trial to the
-rovers it commanded.
+MCS reports that the active waypoint was reached. After 10 seconds the active
+waypoint is reported overdue without faulting or stopping refresh. The onboard
+controller coalesces identical refresh messages. Stop with Ctrl-C for graceful
+end_trial cleanup.
 
 
 7. REAL MCS WITH ROVERS TURNED OFF
@@ -195,21 +190,16 @@ Inspect all computed setpoints:
 ros2 topic echo /waverover_swarm/controller_telemetry
 
 To test actual waypoint publication with the rovers off, stop the dry-run
-coordinator and relaunch:
-
-ros2 launch waverover_swarm_controller swarm_controller.launch.py   config_file:=/home/derder/waverover_experiments/dynamic_heuristic.yaml   algorithm:=heuristic   dry_run:=false
-
-Listen before arming:
+coordinator, start the listener first:
 
 ros2 topic echo /waverover_131/waypoints
 
-Arm:
+Then relaunch in live mode; validated results dispatch automatically:
 
-ros2 service call /waverover_swarm/arm   std_srvs/srv/SetBool "{data: true}"
+ros2 launch waverover_swarm_controller swarm_controller.launch.py   config_file:=/home/derder/waverover_experiments/dynamic_heuristic.yaml   algorithm:=heuristic   dry_run:=false
 
-Disarm when finished:
-
-ros2 service call /waverover_swarm/arm   std_srvs/srv/SetBool "{data: false}"
+Stop the coordinator with Ctrl-C when finished and verify end_trial for each
+commanded rover.
 
 
 8. RECORD REAL MCS WITHOUT WAYPOINT PUBLICATION
@@ -228,7 +218,8 @@ Then use the normal supervisor command:
 
 ros2 run waverover_swarm_controller run_experiment   --config /home/derder/waverover_experiments/dynamic_heuristic.yaml
 
-The supervisor still forces dry-run and will not publish rover waypoints.
+The supervisor respects safety.dry_run from this YAML. Keep it true for a
+non-publishing recording; false enables automatic validated waypoint dispatch.
 
 
 9. TARGET VISUALIZATION
@@ -274,10 +265,13 @@ ros2 node list | sort
 12. IMPORTANT BEHAVIOR
 ----------------------
 
-- run_experiment always forces dry-run.
+- run_experiment respects safety.dry_run from the selected experiment YAML.
 - The synthetic trajectories are open-loop and ignore controller waypoints.
-- The standalone coordinator must use dry_run:=false and be armed before it
-  publishes waypoints.
+- A coordinator with dry_run:=false automatically publishes after fresh
+  synchronized poses and a valid result; start listeners before launching it.
+- A coordinator fault after dispatch begins is latched until process restart.
+- Active waypoints refresh at waypoint_dispatch.refresh_period_sec; the overdue
+  threshold is warning-only and does not publish end_trial.
 - Fake and real MCS publishers must not run at the same time.
 - The algorithm launch argument overrides controller.algorithm in the YAML.
 - Configuration changes do not require rebuilding the ROS workspace.

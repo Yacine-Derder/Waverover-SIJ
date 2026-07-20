@@ -1,19 +1,23 @@
+from dataclasses import replace
 import importlib.util
 from pathlib import Path
 import time
 from types import SimpleNamespace
 
 from builtin_interfaces.msg import Time
+from diagnostic_msgs.msg import DiagnosticStatus
 from launch.actions import DeclareLaunchArgument
 from launch_ros.actions import Node
 from rclpy.validate_topic_name import validate_topic_name
 
 from waverover.stack_config import load_stack_config
+import waverover_swarm_controller.coordinator_node as coordinator_module
 from waverover_swarm_controller.coordinator_node import (
     SwarmCoordinator,
     predicted_path_topic,
 )
 from waverover_swarm_controller.models import ControllerResult
+from waverover_swarm_controller.waypoint_dispatcher import WaypointDispatcher
 
 
 def package_root():
@@ -50,9 +54,9 @@ def test_transient_pose_warning_clears_after_valid_cycle_but_fault_stays_latched
             self.latest_stop_reason = 'Missing poses for: 134.'
             self.dispatcher = SimpleNamespace(
                 faulted=faulted,
+                commanded_robot_ids=(),
                 update_pending=lambda _setpoints: None,
             )
-            self.armed = False
             self.latest_snapshot = None
             self.latest_result = None
             self._snapshot = lambda: object()
@@ -62,6 +66,7 @@ def test_transient_pose_warning_clears_after_valid_cycle_but_fault_stays_latched
             self._publish_visualization = lambda _snapshot, _result: None
             self._publish_controller_telemetry = lambda *_args: None
             self._publish_diagnostics = lambda: None
+            self._dispatch = lambda _snapshot: None
 
     recovered = FakeCoordinator(faulted=False)
     SwarmCoordinator._control_cycle(recovered)
@@ -72,19 +77,149 @@ def test_transient_pose_warning_clears_after_valid_cycle_but_fault_stays_latched
     assert faulted.latest_stop_reason == 'Missing poses for: 134.'
 
 
-def test_dry_run_arm_request_is_rejected():
-    coordinator = SimpleNamespace(
-        armed=False,
-        config=SimpleNamespace(safety=SimpleNamespace(dry_run=True)),
+def test_coordinator_has_no_arm_interface_or_state():
+    source = (
+        package_root() / 'waverover_swarm_controller' / 'coordinator_node.py'
+    ).read_text(encoding='utf-8')
+
+    assert 'std_srvs' not in source
+    assert 'arm_service' not in source
+    assert 'self.armed' not in source
+
+
+def test_dispatch_suppresses_dry_run_and_live_mode_publishes_immediately(
+    example_config, snapshot, monkeypatch
+):
+    class Publisher:
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, message):
+            self.messages.append(message)
+
+    def coordinator(dry_run):
+        config = replace(
+            example_config,
+            safety=replace(example_config.safety, dry_run=dry_run),
+        )
+        dispatcher = WaypointDispatcher(
+            snapshot.robots, config.waypoint_dispatch
+        )
+        dispatcher.update_pending({
+            robot_id: state.position
+            for robot_id, state in snapshot.robots.items()
+        })
+        publishers = {robot_id: Publisher() for robot_id in snapshot.robots}
+        return SimpleNamespace(
+            config=config,
+            dispatcher=dispatcher,
+            waypoint_publishers=publishers,
+            latest_handoff='none',
+            get_clock=lambda: SimpleNamespace(
+                now=lambda: SimpleNamespace(to_msg=lambda: Time())
+            ),
+            get_logger=lambda: SimpleNamespace(info=lambda _message: None),
+            _stop_trial=lambda _reason: None,
+        ), publishers
+
+    now = [10.0]
+    monkeypatch.setattr(coordinator_module.time, 'monotonic', lambda: now[0])
+
+    dry, dry_publishers = coordinator(True)
+    SwarmCoordinator._dispatch(dry, snapshot)
+    assert all(not publisher.messages for publisher in dry_publishers.values())
+    assert dry.dispatcher.commanded_robot_ids == ()
+
+    live, live_publishers = coordinator(False)
+    SwarmCoordinator._dispatch(live, snapshot)
+    assert all(len(publisher.messages) == 1
+               for publisher in live_publishers.values())
+    assert live.dispatcher.commanded_robot_ids == tuple(sorted(snapshot.robots))
+
+    now[0] = 10.9
+    SwarmCoordinator._dispatch(live, snapshot)
+    assert all(len(publisher.messages) == 1
+               for publisher in live_publishers.values())
+
+    now[0] = 11.0
+    SwarmCoordinator._dispatch(live, snapshot)
+    assert all(len(publisher.messages) == 2
+               for publisher in live_publishers.values())
+    for publisher in live_publishers.values():
+        first, refreshed = publisher.messages
+        assert (first.point.x, first.point.y) == (
+            refreshed.point.x, refreshed.point.y
+        )
+
+
+def test_dry_run_stop_never_publishes_end_trial(example_config, snapshot):
+    class Publisher:
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, message):
+            self.messages.append(message)
+
+    dispatcher = WaypointDispatcher(
+        snapshot.robots, example_config.waypoint_dispatch
     )
-    request = SimpleNamespace(data=True)
-    response = SimpleNamespace(success=None, message='')
+    for state in dispatcher.states.values():
+        state.ever_commanded = True
+    publishers = {robot_id: Publisher() for robot_id in snapshot.robots}
+    coordinator = SimpleNamespace(
+        config=example_config,
+        dispatcher=dispatcher,
+        end_trial_publishers=publishers,
+        latest_stop_reason='',
+        _end_sent_for_stop=False,
+        get_logger=lambda: SimpleNamespace(error=lambda _message: None),
+    )
 
-    returned = SwarmCoordinator._arm_callback(coordinator, request, response)
+    SwarmCoordinator._stop_trial(coordinator, 'test stop')
 
-    assert returned is response
-    assert not response.success
-    assert response.message == 'Cannot arm while dry_run is true.'
+    assert all(not publisher.messages for publisher in publishers.values())
+    assert dispatcher.faulted
+
+
+def test_live_cleanup_faults_and_sends_one_end_trial_per_commanded_rover(
+    example_config, snapshot
+):
+    class Publisher:
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, message):
+            self.messages.append(message)
+
+    config = replace(
+        example_config,
+        safety=replace(example_config.safety, dry_run=False),
+    )
+    dispatcher = WaypointDispatcher(snapshot.robots, config.waypoint_dispatch)
+    for state in dispatcher.states.values():
+        state.ever_commanded = True
+    publishers = {robot_id: Publisher() for robot_id in snapshot.robots}
+    coordinator = SimpleNamespace(
+        config=config,
+        dispatcher=dispatcher,
+        end_trial_publishers=publishers,
+        latest_stop_reason='',
+        _end_sent_for_stop=False,
+        _cleanup_complete=False,
+        get_logger=lambda: SimpleNamespace(error=lambda _message: None),
+    )
+    coordinator._stop_trial = lambda reason: SwarmCoordinator._stop_trial(
+        coordinator, reason
+    )
+
+    commanded = SwarmCoordinator.cleanup(coordinator)
+    second = SwarmCoordinator.cleanup(coordinator)
+
+    assert commanded == tuple(sorted(snapshot.robots))
+    assert second == ()
+    assert dispatcher.faulted
+    assert all(len(publisher.messages) == 1
+               for publisher in publishers.values())
 
 
 def test_launch_is_standalone_dry_run_by_default():
@@ -156,6 +291,7 @@ def test_safety_rejected_optimization_never_reaches_dispatch_and_recovers(
 
     class FakeDispatcher:
         faulted = False
+        commanded_robot_ids = ()
 
         def __init__(self):
             self.pending_updates = []
@@ -169,7 +305,6 @@ def test_safety_rejected_optimization_never_reaches_dispatch_and_recovers(
         config=example_config,
         controller=SimpleNamespace(compute=lambda _snapshot: rejected),
         dispatcher=dispatcher,
-        armed=False,
         latest_result=None,
         latest_rejected_result=None,
         latest_snapshot=None,
@@ -192,7 +327,6 @@ def test_safety_rejected_optimization_never_reaches_dispatch_and_recovers(
 
     SwarmCoordinator._control_cycle(coordinator)
 
-    assert not coordinator.armed
     assert coordinator.latest_result is None
     assert coordinator.latest_rejected_result is rejected
     assert dispatcher.pending_updates == []
@@ -203,12 +337,11 @@ def test_safety_rejected_optimization_never_reaches_dispatch_and_recovers(
     coordinator.controller = SimpleNamespace(compute=lambda _snapshot: valid)
     SwarmCoordinator._control_cycle(coordinator)
 
-    assert not coordinator.armed
     assert coordinator.latest_stop_reason == ''
     assert coordinator.latest_result is valid
     assert coordinator.latest_rejected_result is None
     assert dispatcher.pending_updates == [valid.setpoints]
-    assert counters['dispatch'] == 0
+    assert counters['dispatch'] == 1
     assert counters['visualization'] == 1
 
 
@@ -234,14 +367,18 @@ def test_rejected_solver_metadata_is_labeled_rejected_in_diagnostics():
             controller=SimpleNamespace(algorithm='convex'),
             safety=SimpleNamespace(dry_run=True),
         ),
-        armed=False,
         latest_result=None,
         latest_rejected_result=rejected,
         latest_snapshot=None,
         latest_stop_reason='safety rejected result',
         latest_handoff='none',
         aggregator=SimpleNamespace(pose_ages=lambda _now: {}),
-        dispatcher=SimpleNamespace(commanded_robot_ids=(), states={}),
+        dispatcher=SimpleNamespace(
+            commanded_robot_ids=(),
+            states={},
+            faulted=False,
+            observability=lambda _now: {},
+        ),
         diagnostics_publisher=publisher,
         get_clock=lambda: SimpleNamespace(
             now=lambda: SimpleNamespace(to_msg=lambda: Time())
@@ -258,4 +395,59 @@ def test_rejected_solver_metadata_is_labeled_rejected_in_diagnostics():
     assert values['solver_status'] == 'optimal_inaccurate'
     assert values['solve_duration_sec'] == '0.125000'
     assert values['selected_edges'] == "(('131', 'station_0'),)"
-    assert values['armed'] == 'False'
+    assert values['dispatch_state'] == 'dry_run'
+
+
+def test_overdue_active_waypoint_is_diagnostic_warning_not_fault(
+    example_config, snapshot, monkeypatch
+):
+    class Publisher:
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, message):
+            self.messages.append(message)
+
+    config = replace(
+        example_config,
+        safety=replace(example_config.safety, dry_run=False),
+        waypoint_dispatch=replace(
+            example_config.waypoint_dispatch,
+            active_waypoint_warning_sec=1.0,
+        ),
+    )
+    dispatcher = WaypointDispatcher(snapshot.robots, config.waypoint_dispatch)
+    dispatcher.update_pending({
+        robot_id: (3.0, 3.0) for robot_id in snapshot.robots
+    })
+    dispatcher.tick(snapshot, 10.0, commands_enabled=True)
+    publisher = Publisher()
+    coordinator = SimpleNamespace(
+        config=config,
+        latest_result=None,
+        latest_rejected_result=None,
+        latest_snapshot=snapshot,
+        latest_stop_reason='',
+        latest_handoff='waypoint',
+        aggregator=SimpleNamespace(
+            pose_ages=lambda _now: {
+                robot_id: 0.1 for robot_id in snapshot.robots
+            }
+        ),
+        dispatcher=dispatcher,
+        diagnostics_publisher=publisher,
+        get_clock=lambda: SimpleNamespace(
+            now=lambda: SimpleNamespace(to_msg=lambda: Time())
+        ),
+    )
+    monkeypatch.setattr(coordinator_module.time, 'monotonic', lambda: 11.1)
+
+    SwarmCoordinator._publish_diagnostics(coordinator)
+
+    status = publisher.messages[0].status[0]
+    values = {item.key: item.value for item in status.values}
+    assert status.level == DiagnosticStatus.WARN
+    assert status.message.startswith('active waypoint overdue:')
+    assert values['active_waypoint_overdue_robot_2'] == 'True'
+    assert float(values['active_waypoint_age_sec_robot_2']) > 1.0
+    assert not dispatcher.faulted

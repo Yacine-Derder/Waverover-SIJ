@@ -1,4 +1,4 @@
-"""Supervise a dry-run coordinator, optional synthetic MCS, and rosbag2."""
+"""Supervise a configured coordinator, optional synthetic MCS, and rosbag2."""
 
 import argparse
 from dataclasses import asdict
@@ -64,8 +64,8 @@ class RunEventPublisher(Node):
                 durability=DurabilityPolicy.TRANSIENT_LOCAL,
             ),
         )
-        # Advertise command/TF topics without ever publishing. This lets a bag
-        # record their schemas and zero message counts in dry-run.
+        # Advertise command/TF topics without publishing from this node so bags
+        # have their schemas even when a dry-run records zero messages.
         from waverover.stack_config import robot_topic
         self.schema_publishers = [
             self.create_publisher(
@@ -157,7 +157,6 @@ def _close_child_log(child):
 def _resolved_run_config(config_path, destination, algorithm, seed):
     source = yaml.safe_load(Path(config_path).read_text(encoding='utf-8'))
     source.setdefault('controller', {})['algorithm'] = algorithm
-    source.setdefault('safety', {})['dry_run'] = True
     source.setdefault('synthetic_mcs', {})['seed'] = int(seed)
     source['targets_file'] = 'targets.yaml'
     with Path(destination).open('w', encoding='utf-8') as stream:
@@ -182,7 +181,7 @@ def parse_arguments(arguments=None):
 
 def main(args=None):
     arguments = parse_arguments(args)
-    original_config = load_experiment(arguments.config, dry_run_override=True)
+    original_config = load_experiment(arguments.config)
     algorithm = arguments.algorithm or original_config.controller.algorithm
     requested_seed = (
         None if arguments.fresh_seed else (
@@ -214,7 +213,7 @@ def main(args=None):
         algorithm,
         actual_seed,
     )
-    config = load_experiment(resolved_config_path, dry_run_override=True)
+    config = load_experiment(resolved_config_path)
     duration = (
         arguments.duration_sec
         if arguments.duration_sec is not None
@@ -247,7 +246,7 @@ def main(args=None):
         'swarm_controller.launch.py',
         'config_file:=' + str(resolved_config_path),
         'algorithm:=' + algorithm,
-        'dry_run:=true',
+        'dry_run:=' + str(config.safety.dry_run).lower(),
     ]
     git = _git_information(original_config.source_path.parent)
     try:
@@ -266,7 +265,7 @@ def main(args=None):
         'resolved_config': 'config/experiment.yaml',
         'resolved_targets': 'config/targets.yaml',
         'algorithm': algorithm,
-        'dry_run': True,
+        'dry_run': config.safety.dry_run,
         'pose_source': pose_source,
         'synthetic_mode': config.synthetic_mcs.mode,
         'synthetic_seed': actual_seed,
@@ -286,6 +285,7 @@ def main(args=None):
         'station': asdict(config.station),
         'targets': [asdict(target) for target in config.targets],
         'communication': asdict(config.communication),
+        'waypoint_dispatch': asdict(config.waypoint_dispatch),
         'safety': asdict(config.safety),
         'host': socket.gethostname(),
         'ros_distribution': os.environ.get('ROS_DISTRO'),

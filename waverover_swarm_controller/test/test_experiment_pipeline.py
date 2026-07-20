@@ -22,6 +22,7 @@ from waverover_swarm_controller.experiment_recording import (
     recording_topics,
 )
 from waverover_swarm_controller.replay_run import interpolate_pose
+from waverover_swarm_controller.run_experiment import _resolved_run_config
 
 
 def example_config():
@@ -37,6 +38,8 @@ def test_recording_profiles_build_safe_topics_for_numeric_ids():
 
     assert '/macortex_bridge/waverover_134/pose' in core
     assert '/waverover_swarm/predicted_path/waverover_7' in core
+    assert '/waverover_134/waypoints' in core
+    assert '/waverover_swarm/controller_telemetry' in core
     assert '/waverover_134/cmd_vel' in core
     assert '/waverover_134/scan' not in core
     assert '/waverover_134/scan' in full
@@ -73,16 +76,40 @@ def test_manifest_updates_atomically(tmp_path):
     assert list(tmp_path.glob('.*.tmp-*')) == []
 
 
-def test_runner_uses_argument_lists_defaults_dry_and_never_arms():
+def test_runner_uses_argument_lists_and_preserves_configured_dry_run():
     source = (
         Path(__file__).parents[1]
         / 'waverover_swarm_controller' / 'run_experiment.py'
     ).read_text(encoding='utf-8')
     assert 'shell=True' not in source
-    assert "dry_run:=true" in source
-    assert "dry_run_override=True" in source
+    assert "str(config.safety.dry_run).lower()" in source
+    assert "'waypoint_dispatch': asdict(config.waypoint_dispatch)" in source
+    assert "dry_run_override=True" not in source
+    assert "['dry_run'] = True" not in source
     assert '/waverover_swarm/arm' not in source
     assert "'BEGIN'" in source and "'END'" in source
+
+
+@pytest.mark.parametrize('dry_run', [True, False])
+def test_resolved_run_config_preserves_safety_dry_run(
+    tmp_path, dry_run
+):
+    source = tmp_path / 'source.yaml'
+    destination = tmp_path / 'resolved.yaml'
+    source.write_text(yaml.safe_dump({
+        'controller': {'algorithm': 'heuristic'},
+        'safety': {'dry_run': dry_run},
+        'synthetic_mcs': {'seed': 1},
+        'targets_file': '/original/targets.yaml',
+    }), encoding='utf-8')
+
+    _resolved_run_config(source, destination, 'convex', 42)
+
+    resolved = yaml.safe_load(destination.read_text(encoding='utf-8'))
+    assert resolved['safety']['dry_run'] is dry_run
+    assert resolved['controller']['algorithm'] == 'convex'
+    assert resolved['synthetic_mcs']['seed'] == 42
+    assert resolved['targets_file'] == 'targets.yaml'
 
 
 def test_known_paper_metrics_and_yaw_wrap():

@@ -5,7 +5,10 @@ import pytest
 
 from waverover_swarm_controller.controllers import controller_from_config
 from waverover_swarm_controller.controllers.heuristic import HeuristicController
-from waverover_swarm_controller.models import SwarmSnapshot
+from waverover_swarm_controller.controllers.heuristic_decentralized import (
+    DecentralizedHeuristicController,
+)
+from waverover_swarm_controller.models import SwarmSnapshot, TargetState
 
 
 def with_algorithm(config, algorithm):
@@ -68,9 +71,10 @@ def test_central_heuristic_matches_small_reference_chain(
         tuple(round(value, 6) for value in point)
         for point in result.setpoints.values()
     }
-    # The simulator executable behavior creates two main-target relay slots;
-    # the deliberate edge fix leaves the insufficient third rover at station.
-    assert rounded == {(0.0, 0.0), (1.25, 0.0), (2.5, 0.0)}
+    # Two main-target relay slots remain, while the surplus rover holds its
+    # measured position instead of duplicating the fixed station endpoint.
+    assert {(1.25, 0.0), (2.5, 0.0)} <= rounded
+    assert (0.0, 0.0) not in rounded
 
 
 def test_relay_count_handles_coincident_and_short_targets(example_config):
@@ -78,3 +82,33 @@ def test_relay_count_handles_coincident_and_short_targets(example_config):
 
     assert controller.optimal_relay_count(0.0) == 0
     assert controller.optimal_relay_count(0.01) >= 1
+
+
+@pytest.mark.parametrize(
+    'controller_type',
+    [HeuristicController, DecentralizedHeuristicController],
+)
+@pytest.mark.parametrize('station_offset', [0.0, 5e-13])
+def test_heuristics_keep_station_in_graph_but_never_assign_its_endpoint(
+    controller_type, station_offset, example_config, snapshot
+):
+    station = snapshot.station.position
+    targets = {
+        'main_target': TargetState(
+            'main_target',
+            station[0] + station_offset,
+            station[1],
+            10.0,
+            is_main=True,
+        )
+    }
+    selected = replace(snapshot, targets=targets)
+
+    result = controller_type(example_config).compute(selected)
+
+    assert set(result.setpoints) == set(snapshot.robots)
+    assert all(
+        math.dist(point, station) > 1e-9
+        for point in result.setpoints.values()
+    )
+    assert any(snapshot.station.station_id in edge for edge in result.selected_edges)

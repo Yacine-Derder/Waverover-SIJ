@@ -53,7 +53,8 @@ class ControllerConfig:
 class DispatchConfig:
     reached_distance_m: float
     handoff_delay_sec: float
-    maximum_active_time_sec: float
+    refresh_period_sec: float
+    active_waypoint_warning_sec: float
 
 
 @dataclass(frozen=True)
@@ -484,7 +485,19 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
         waypoint_dispatch=DispatchConfig(
             reached_distance_m=_finite(dispatch_data.get('reached_distance_m'), 'waypoint_dispatch.reached_distance_m', positive=True),
             handoff_delay_sec=_finite(dispatch_data.get('handoff_delay_sec'), 'waypoint_dispatch.handoff_delay_sec', nonnegative=True),
-            maximum_active_time_sec=_finite(dispatch_data.get('maximum_active_time_sec'), 'waypoint_dispatch.maximum_active_time_sec', positive=True),
+            refresh_period_sec=_finite(
+                dispatch_data.get('refresh_period_sec', 1.0),
+                'waypoint_dispatch.refresh_period_sec',
+                positive=True,
+            ),
+            active_waypoint_warning_sec=_finite(
+                dispatch_data.get(
+                    'active_waypoint_warning_sec',
+                    dispatch_data.get('maximum_active_time_sec', 10.0),
+                ),
+                'waypoint_dispatch.active_waypoint_warning_sec',
+                positive=True,
+            ),
         ),
         communication=CommunicationConfig(ideal_range, maximum_range),
         safety=SafetyConfig(

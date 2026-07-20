@@ -10,7 +10,7 @@ from .metrics import (
 )
 
 
-CONTROLLER_TELEMETRY_SCHEMA_VERSION = 1
+CONTROLLER_TELEMETRY_SCHEMA_VERSION = 3
 
 
 def _point(point):
@@ -47,11 +47,12 @@ def build_controller_telemetry(
     result,
     result_state,
     ros_timestamp,
-    armed,
+    commands_enabled,
     stop_reason,
     pose_ages,
     active_waypoints,
     pending_waypoints,
+    dispatch_observability,
     latest_handoff,
 ):
     robots = {}
@@ -98,7 +99,7 @@ def build_controller_telemetry(
         },
         'algorithm': config.controller.algorithm,
         'result_state': str(result_state),
-        'armed': bool(armed),
+        'commands_enabled': bool(commands_enabled),
         'dry_run': bool(config.safety.dry_run),
         'robots': robots,
         'station': (
@@ -122,6 +123,35 @@ def build_controller_telemetry(
         'pending_waypoints': {
             robot_id: None if point is None else _point(point)
             for robot_id, point in sorted(pending_waypoints.items())
+        },
+        'waypoint_dispatch': {
+            robot_id: {
+                'active_waypoint': (
+                    None if values['active_waypoint'] is None else
+                    _point(values['active_waypoint'])
+                ),
+                'pending_waypoint': (
+                    None if values['pending_waypoint'] is None else
+                    _point(values['pending_waypoint'])
+                ),
+                'active_waypoint_age_sec': (
+                    None if values['active_waypoint_age_sec'] is None else
+                    _finite_or_none(values['active_waypoint_age_sec'])
+                ),
+                'last_publication_monotonic_sec': (
+                    None if values['last_publication_monotonic_sec'] is None else
+                    _finite_or_none(values['last_publication_monotonic_sec'])
+                ),
+                'last_publication_age_sec': (
+                    None if values['last_publication_age_sec'] is None else
+                    _finite_or_none(values['last_publication_age_sec'])
+                ),
+                'refresh_count': int(values['refresh_count']),
+                'active_waypoint_overdue': bool(
+                    values['active_waypoint_overdue']
+                ),
+            }
+            for robot_id, values in sorted(dispatch_observability.items())
         },
         'predicted_paths': (
             {

@@ -34,12 +34,12 @@ class DecentralizedHeuristicController(HeuristicController):
         station = np.asarray(snapshot.station.position, dtype=float)
         target_id = self._agent_targets.get(robot_id)
         if target_id not in snapshot.targets:
-            return tuple(station)
+            return tuple(snapshot.robots[robot_id].position)
         target = np.asarray(snapshot.targets[target_id].position, dtype=float)
         delta = target - station
         distance = np.linalg.norm(delta)
         if distance <= 1e-12:
-            return tuple(station)
+            return tuple(snapshot.robots[robot_id].position)
         unit = delta / distance
         members = sorted(
             key for key, value in self._agent_targets.items()
@@ -90,6 +90,7 @@ class DecentralizedHeuristicController(HeuristicController):
             setpoints[robot_id] = self._compute_agent(
                 robot_id, snapshot, setpoints
             )
+        self._validate_nonstation_setpoints(snapshot, setpoints)
         return ControllerResult(
             setpoints=setpoints,
             target_assignments=self._agent_targets,

@@ -60,13 +60,23 @@ def receive(controller, message):
     WaypointController._waypoint_callback(controller, message)
 
 
-def test_consecutive_duplicate_does_not_grow_queue_but_empty_accepts_copy():
-    controller = make_controller()
+def test_refreshed_duplicates_coalesce_and_reached_coordinate_is_accepted_again():
+    controller = make_controller(control_mode='twist')
     receive(controller, waypoint())
     receive(controller, waypoint(x=1.0 + 0.5e-6))
+    receive(controller, waypoint())
     assert list(controller.waypoint_queue) == [(1.0, 2.0)]
 
-    controller.waypoint_queue.clear()
+    controller.goal_tolerance_m = 0.1
+    controller._lookup_pose_or_stop = lambda: SimpleNamespace(
+        x=1.0, y=2.0, yaw=0.0
+    )
+    controller.publish_stop = lambda: None
+    WaypointController._control_step(controller)
+    assert not controller.waypoint_queue
+
+    # Duplicate suppression is queue-local, so a later mission may reuse a
+    # coordinate after the control step removes the reached target.
     receive(controller, waypoint())
     assert list(controller.waypoint_queue) == [(1.0, 2.0)]
 

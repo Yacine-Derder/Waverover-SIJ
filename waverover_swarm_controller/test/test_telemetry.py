@@ -35,14 +35,36 @@ def test_controller_telemetry_is_versioned_structured_and_canonical(
         False,
         '',
         {robot_id: 0.1 for robot_id in snapshot.robots},
-        {robot_id: None for robot_id in snapshot.robots},
         setpoints,
+        {robot_id: None for robot_id in snapshot.robots},
+        {
+            robot_id: {
+                'active_waypoint': setpoints[robot_id],
+                'pending_waypoint': None,
+                'active_waypoint_age_sec': 12.0,
+                'last_publication_monotonic_sec': 50.0,
+                'last_publication_age_sec': 0.25,
+                'refresh_count': 7,
+                'active_waypoint_overdue': True,
+            }
+            for robot_id in snapshot.robots
+        },
         'none',
     )
 
-    assert payload['schema_version'] == 1
+    assert payload['schema_version'] == 3
     assert payload['result_state'] == 'valid'
+    assert payload['commands_enabled'] is False
+    assert 'armed' not in payload
     assert payload['target_assignments']['robot_2'] == 'main_target'
+    dispatch = payload['waypoint_dispatch']['robot_2']
+    assert dispatch['active_waypoint'] == list(setpoints['robot_2'])
+    assert dispatch['pending_waypoint'] is None
+    assert dispatch['active_waypoint_age_sec'] == 12.0
+    assert dispatch['last_publication_monotonic_sec'] == 50.0
+    assert dispatch['last_publication_age_sec'] == 0.25
+    assert dispatch['refresh_count'] == 7
+    assert dispatch['active_waypoint_overdue']
     assert payload['predicted_minimum_separation']['step'] == 0
     assert payload['current_minimum_separation']['pair'] == [
         'robot_10', 'robot_2'

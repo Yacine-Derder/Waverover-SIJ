@@ -82,7 +82,7 @@ slam:
 
 waypoint_controller:
   control_rate_hz: 10.0
-  goal_tolerance_m: 0.15
+  goal_tolerance_m: 0.05
   heading_tolerance_deg: 15.0
   forward_linear_x: 0.25
   turn_angular_z: 0.40

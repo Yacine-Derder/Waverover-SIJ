@@ -1,5 +1,5 @@
 # Editable example: verify these coordinates against the robotics_lab origin
-# and available floor area before arming.
+# and available floor area before enabling live dispatch.
 frame_id: robotics_lab
 main_target_id: target_main
 

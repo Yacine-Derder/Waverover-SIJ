@@ -23,6 +23,10 @@ def test_calibrated_defaults_and_pc_robot_ids():
     assert config.controller.mpc_horizon == 5
     assert config.controller.mpc_max_step_m == pytest.approx(0.333333)
     assert config.controller.minimum_mpc_lookahead_m == pytest.approx(0.30)
+    assert config.waypoint_dispatch.refresh_period_sec == pytest.approx(1.0)
+    assert config.waypoint_dispatch.active_waypoint_warning_sec == pytest.approx(
+        10.0
+    )
     assert config.safety.dry_run
     assert config.synthetic_mcs.mode == 'static'
     assert config.synthetic_mcs.formation_coupling == 'rigid'
@@ -63,6 +67,25 @@ def test_missing_pipeline_sections_keep_backward_compatible_defaults(tmp_path):
     assert config.synthetic_mcs.initial_radius_m == pytest.approx(0.5)
     assert config.recording.profile == 'core'
     assert config.analysis.connectivity_alpha == pytest.approx(5.0)
+
+
+def test_legacy_active_timeout_is_accepted_as_nonfatal_warning_alias(tmp_path):
+    source = yaml.safe_load(example_path().read_text(encoding='utf-8'))
+    source['targets_file'] = str(
+        Path(__file__).parents[1] / 'config' / 'targets.yaml'
+    )
+    source['waypoint_dispatch'].pop('active_waypoint_warning_sec')
+    source['waypoint_dispatch'].pop('refresh_period_sec')
+    source['waypoint_dispatch']['maximum_active_time_sec'] = 12.5
+    experiment = tmp_path / 'legacy-dispatch.yaml'
+    experiment.write_text(yaml.safe_dump(source), encoding='utf-8')
+
+    config = load_experiment(experiment)
+
+    assert config.waypoint_dispatch.refresh_period_sec == pytest.approx(1.0)
+    assert config.waypoint_dispatch.active_waypoint_warning_sec == pytest.approx(
+        12.5
+    )
 
 
 def test_duplicate_target_and_outside_geofence_are_rejected(tmp_path):

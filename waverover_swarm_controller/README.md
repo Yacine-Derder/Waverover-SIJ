@@ -24,9 +24,13 @@ After conservative safety validation, an event-triggered dispatcher maintains
 at most one active rover waypoint and one replaceable pending setpoint in PC
 memory. It publishes only to `/waverover_<ID>/waypoints`; the existing onboard
 waypoint controller remains the only autonomous `cmd_vel` publisher.
+The active point is refreshed at the configured monotonic interval (default
+`1.0 s`). The rover controller coalesces consecutive coordinate-equivalent
+refreshes, so they do not grow its FIFO.
 
-The PC exposes `/waverover_swarm/arm` as `std_srvs/srv/SetBool`. Diagnostics,
-markers, and predicted paths are under `/waverover_swarm`.
+There is no arming service or armed state. In live mode, fresh synchronized
+poses and a valid controller result immediately enable waypoint publication.
+Diagnostics, markers, and predicted paths are under `/waverover_swarm`.
 
 ## Algorithms
 
@@ -96,6 +100,10 @@ solver failures never fall back to another algorithm; and unused `cvxpygen`
 code generation was removed. Deterministic string IDs replace simulator class
 counters and all iteration order is canonical. The decentralized implementation
 retains local chain behavior but removes simulator display/color/battery state.
+The fixed station/GCS remains a communication-graph node but is excluded from
+rover-assignable relay positions. Surplus centralized-heuristic rovers hold
+their measured position instead of receiving the former station-position
+fallback; a rover for which no non-station setpoint exists fails closed.
 
 ## Measured rover surrogate
 
@@ -142,13 +150,13 @@ weights, nonnegative weights, and positions inside the experiment geofence.
 The supplied target coordinates, `1.5/2.0 m` communication ranges, and
 `[-4, 4] m` geofence are illustrative. Verify them against the actual
 `robotics_lab` origin, floor area, MCS calibration, radio behavior, and rover
-footprints before arming.
+footprints before enabling live dispatch.
 
 ## Operator-PC dependencies
 
 The package deliberately uses lazy imports for PC-only optimization modules.
 It remains discoverable and buildable on a rover without them; selecting an
-unavailable controller produces a clear arming/runtime error and publishes no
+unavailable controller produces a clear runtime error and publishes no
 waypoint. `cvxpygen` is neither used nor required.
 
 On an Ubuntu 24.04 ROS 2 Jazzy operator PC:
@@ -161,7 +169,7 @@ sudo apt install \
   ros-jazzy-ros2bag ros-jazzy-rosbag2-py \
   ros-jazzy-rosbag2-storage-default-plugins \
   ros-jazzy-diagnostic-msgs ros-jazzy-geometry-msgs ros-jazzy-nav-msgs \
-  ros-jazzy-std-msgs ros-jazzy-std-srvs ros-jazzy-visualization-msgs
+  ros-jazzy-std-msgs ros-jazzy-visualization-msgs
 
 cd ~/ros2_ws
 source /opt/ros/jazzy/setup.bash
@@ -279,7 +287,7 @@ ros2 topic echo /waverover_swarm/controller_telemetry
 Only run one blocking `ros2 topic echo` command at a time. A healthy cycle
 reports fresh poses, `controller_result_state=valid`, a valid solver status,
 and per-rover `pending_<ID>` setpoints. Dry-run deliberately publishes no
-messages on `/waverover_<ID>/waypoints` and cannot be armed.
+messages on `/waverover_<ID>/waypoints` or `/waverover_<ID>/end_trial`.
 
 The `algorithm` launch value may be `heuristic`,
 `heuristic_decentralized`, `convex`, `mpc_centralized`, or
@@ -298,41 +306,24 @@ ros2 launch waverover_swarm_controller swarm_controller.launch.py \
   dry_run:=false
 ```
 
-Before arming, use Terminal 3 to watch a rover's output:
+Before starting the live coordinator, use Terminal 3 to watch a rover's output:
 
 ```bash
 ros2 topic echo /waverover_131/waypoints
 ```
 
-In Terminal 4, arm the coordinator:
-
-```bash
-source /opt/ros/jazzy/setup.bash
-source /home/derder/ros2_ws/install/setup.bash
-export ROS_DOMAIN_ID=42
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-export ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET
-
-ros2 service call /waverover_swarm/arm \
-  std_srvs/srv/SetBool "{data: true}"
-```
-
-A successful call publishes one active waypoint per configured rover. Inspect
-other rover topics by replacing `131`. Disarm when finished:
-
-```bash
-ros2 service call /waverover_swarm/arm \
-  std_srvs/srv/SetBool "{data: false}"
-```
+As soon as all configured poses are fresh and synchronized and the controller
+returns a safety-valid result, one active waypoint is published per configured
+rover. Inspect other rover topics by replacing `131`. Stop the coordinator
+with Ctrl-C when finished; cleanup publishes `end_trial` to commanded rovers.
 
 With stationary fake poses or real rovers that are turned off, the dispatcher
-does not publish a stream of new waypoints. It keeps recomputing replaceable
-pending setpoints, visible in diagnostics and telemetry, but waits for MCS to
-show that the active waypoint was reached before handing off the next one.
-After `waypoint_dispatch.maximum_active_time_sec` (10 seconds in the supplied
-configuration), it faults and sends `end_trial` to the rover IDs it commanded.
-Increase this timeout only for a deliberate stationary observation test; do not
-treat that change as a physical-motion safety setting.
+refreshes the exact active waypoint every `refresh_period_sec` while continuing
+to replace only the PC-side pending setpoint. It does not hand off pending until
+MCS confirms reach continuously through the handoff delay. After
+`active_waypoint_warning_sec` (10 seconds by default), diagnostics and telemetry
+show a non-fatal overdue warning; refresh and dispatch continue. The legacy
+`maximum_active_time_sec` key is accepted as an alias for this warning threshold.
 
 ### 4. Real-MCS test with rovers turned off
 
@@ -357,7 +348,7 @@ ros2 topic echo /macortex_bridge/waverover_131/pose --once
 Repeat the last two commands for IDs 132 through 136. Every pose must have
 `header.frame_id: robotics_lab`, finite coordinates, a valid quaternion, and
 a sufficiently fresh publication rate. The configuration must list exactly the
-rover IDs supplied by the MCS; arming requires a fresh, synchronized pose for
+rover IDs supplied by the MCS; dispatch requires a fresh, synchronized pose for
 every listed ID.
 
 Start with the dry-run coordinator in Terminal 2:
@@ -372,8 +363,8 @@ ros2 launch waverover_swarm_controller swarm_controller.launch.py \
 Inspect diagnostics and telemetry in Terminal 3. Verify the actual MCS
 coordinates against the configured station, targets, communication ranges,
 geofence, and minimum separation. If the dry-run remains valid, stop Terminal
-2, relaunch with `dry_run:=false`, start a waypoint echo in Terminal 3, and
-arm from Terminal 4 using the commands in the preceding section. Rover
+2, start a waypoint echo in Terminal 3, then relaunch with `dry_run:=false`.
+Rover
 processes and waypoint subscribers do not need to be running for the ROS
 publisher and a PC-side `ros2 topic echo` subscriber to observe the generated
 waypoint.
@@ -393,7 +384,7 @@ is the preferred first test with real MCS data.
 | Target coordinates, weights, and main target | the referenced targets YAML |
 | Rover motion model | `vehicle` |
 | Control period, MPC horizon/step, seed, distributed semantics | `controller` |
-| Handoff tolerance/delay and active timeout | `waypoint_dispatch` |
+| Handoff tolerance/delay, refresh period, and overdue warning | `waypoint_dispatch` |
 | Link ranges | `communication` |
 | Minimum separation and allowed floor area | `safety` |
 | Fake-pose behavior only | `synthetic_mcs` |
@@ -404,7 +395,7 @@ The `recording.pose_source` and `recording.start_synthetic` fields apply to
 the `run_experiment` supervisor. They do not select the pose source for a
 standalone `swarm_controller.launch.py` process.
 
-## Dry-run, arming, and topics
+## Dry-run, automatic dispatch, and topics
 
 Always begin in dry-run:
 
@@ -415,16 +406,15 @@ ros2 launch waverover_swarm_controller swarm_controller.launch.py \
   dry_run:=true
 ```
 
-Dry-run computes controllers, validates safety, and publishes diagnostics and
-visualization, but never publishes a waypoint or startup `end_trial`. It cannot
-be armed. Algorithm changes require stopping/disarming and relaunching.
+Dry-run computes controllers, validates safety, records telemetry, and
+publishes diagnostics and visualization, but never publishes a waypoint or
+`end_trial`. Algorithm changes require stopping and relaunching.
 
 | Purpose              | Topic/service                            |
 | -------------------- | ---------------------------------------- |
 | MCS input            | `/macortex_bridge/waverover_<ID>/pose` |
 | FIFO waypoint output | `/waverover_<ID>/waypoints`            |
 | Reliable stop        | `/waverover_<ID>/end_trial`            |
-| Arm/disarm           | `/waverover_swarm/arm` (`SetBool`)   |
 | Diagnostics          | `/waverover_swarm/diagnostics`         |
 | Markers              | `/waverover_swarm/markers`             |
 | Predicted path       | `/waverover_swarm/predicted_path/waverover_<ID>` |
@@ -438,16 +428,13 @@ ros2 launch waverover_swarm_controller swarm_controller.launch.py \
   config_file:=/absolute/path/to/verified-experiment.yaml \
   algorithm:=heuristic \
   dry_run:=false
-
-ros2 service call /waverover_swarm/arm std_srvs/srv/SetBool "{data: true}"
-ros2 service call /waverover_swarm/arm std_srvs/srv/SetBool "{data: false}"
 ```
 
-Arming fails unless every configured pose is present, valid, fresh, and
-synchronized; configuration/targets are valid; the selected controller and
-solver are available; a complete fresh result exists; and all initial
+Live dispatch starts automatically only when every configured pose is present,
+valid, fresh, and synchronized; configuration/targets are valid; the selected
+controller and solver are available; a complete fresh result exists; and all
 setpoints and predicted paths pass frame, numeric, geofence, edge, and
-separation checks.
+separation checks. Start the waypoint echo before launching live mode.
 
 ## Synthetic MCS poses for PC-only tests
 
@@ -573,8 +560,9 @@ Output formats are selected by a `.png`, `.pdf`, or `.svg` extension. Use
 
 `run_experiment` is a supervisor separate from the safety-critical
 coordinator. It starts rosbag first, publishes versioned `BEGIN`, launches the
-optional synthetic publisher and coordinator, and records without arming. It
-always resolves the run configuration with `dry_run: true`.
+optional synthetic publisher and coordinator. It preserves `safety.dry_run`
+from the experiment YAML: `true` records computed/validated results without
+waypoints or `end_trial`; `false` allows automatic validated dispatch.
 
 ```bash
 ros2 run waverover_swarm_controller run_experiment \
@@ -616,7 +604,9 @@ Every completed coordinator cycle publishes canonical schema-versioned JSON on
 `/waverover_swarm/controller_telemetry`. It contains measured poses/headings,
 station and targets, setpoints, active/pending waypoints, predicted paths,
 selected edges, explicit target assignments when the algorithm has them,
-solver state/timing, valid/rejected/faulted state, separation pairs/steps,
+solver state/timing, valid/rejected/faulted state, dry-run and command-enabled
+state, per-rover active/publication age, monotonic last-publication time,
+refresh count, overdue warning, separation pairs/steps,
 binary and weighted connectivity, pose ages/skew, stop reason, and latest
 handoff. Telemetry publication is observability-only: an exception while
 publishing it cannot validate a controller result or enable commands.
@@ -692,17 +682,24 @@ continuous path through ±pi.
 Each controller cycle only replaces the latest PC-side pending point. A point
 is published when no active waypoint exists, or after MCS shows the active
 point within `0.15 m` continuously through the `0.15 s` handoff delay. The
-delay lets the onboard 10 Hz FIFO controller remove the reached point. MPC
+active point is also republished unchanged every `refresh_period_sec`, using
+monotonic scheduling. A refresh does not change active age, reached state,
+pending state, or safety state. The onboard controller suppresses consecutive
+coordinate-equivalent messages while the target is queued, but accepts that
+coordinate again after the reached target has been removed. The handoff delay
+lets the onboard 10 Hz FIFO controller remove the reached point. MPC
 paths are never published as waypoint sequences. A carrot shorter than
 `0.30 m` is extended in its finite nonzero direction, up to the `0.333333 m`
 step limit; a zero direction faults instead of generating NaNs.
 
-An active waypoint older than `10 s` faults the whole experiment and requires
-explicit rearming. Explicit disarm, graceful exit, Ctrl-C, SIGTERM, stale pose,
-invalid solver output, geofence/separation failure, or timeout stops new
-dispatch and sends one reliable `Empty` to every rover this process actually
-commanded. ROS is briefly drained before teardown and cleanup is idempotent.
-Uncommanded rovers receive no `end_trial`.
+An active waypoint older than `active_waypoint_warning_sec` produces a
+non-fatal warning only. Graceful exit, Ctrl-C, SIGTERM, stale/incomplete poses,
+invalid or stale solver output, geofence/separation failure, and malformed
+values still stop new dispatch and send one reliable `Empty` to every rover
+this process actually commanded.
+Faults after dispatch begins stay latched until restart. ROS is briefly drained
+before teardown and cleanup is idempotent. Uncommanded rovers receive no
+`end_trial`; dry-run never publishes `end_trial`.
 
 A hard PC power loss or `kill -9` cannot execute cleanup. Because rover-side
 code is intentionally unchanged, an already active waypoint may still be
@@ -737,8 +734,9 @@ First restrained-rover test:
    keep an independent emergency stop ready.
 3. Run dry-run for several minutes. Confirm frame, pose age, setpoint, and
    geofence diagnostics and inspect RViz markers.
-4. Relaunch with `dry_run:=false`, arm once, observe exactly one waypoint, then
-   disarm and verify `/waverover_<ID>/end_trial` and zero wheel motion.
+4. Start a waypoint echo, relaunch with `dry_run:=false`, observe exactly one
+   automatic waypoint, then press Ctrl-C and verify
+   `/waverover_<ID>/end_trial` and zero wheel motion.
 5. Only then perform a short clear-floor test at low operational risk.
 
 Staged multi-rover test:
@@ -749,7 +747,7 @@ Staged multi-rover test:
    edges, minimum separation, dispatcher handoffs, and end-trial delivery.
 4. Compare heuristic variants before enabling convex/MPC solvers; inspect every
    predicted path and solver status. Never progress after a fault without
-   identifying its cause and explicitly rearming.
+   identifying its cause and restarting the coordinator.
 
 ## Experiment-pipeline limitations
 

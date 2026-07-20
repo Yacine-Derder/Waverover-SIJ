@@ -14,7 +14,10 @@ def test_zero_robots_and_zero_targets_are_safe(example_config, snapshot):
     empty_targets = replace(snapshot, targets={})
     result = HeuristicController(example_config).compute(empty_targets)
     assert set(result.setpoints) == set(snapshot.robots)
-    assert all(point == snapshot.station.position for point in result.setpoints.values())
+    assert result.setpoints == {
+        robot_id: state.position
+        for robot_id, state in snapshot.robots.items()
+    }
 
     no_station = replace(snapshot, station=None)
     result = HeuristicController(example_config).compute(no_station)

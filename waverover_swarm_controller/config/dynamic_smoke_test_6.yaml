@@ -12,7 +12,7 @@ station:
   id: station_0
   position: [0.0, 0.0]
 
-targets_file: targets_smoke_6.yaml
+targets_file: targets_setup_1.yaml
 
 target_dynamics:
   mode: random_priority

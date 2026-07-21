@@ -432,10 +432,6 @@ class WaypointController(Node):
         ).value))
         self.waypoint_qos_depth = max(1, int(self.declare_parameter(
             'waypoint_qos_depth',
-            'progress_timeout_sec',
-            'minimum_progress_m',
-            'recovery_straight_duration_sec',
-            'maximum_recovery_attempts',
             config.waypoint_qos_depth,
         ).value))
         self.mcs_pose_topic = str(self.declare_parameter(

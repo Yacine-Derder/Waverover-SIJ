@@ -1,10 +1,12 @@
 frame_id: robotics_lab
 targets:
   - id: target_0
-    position: [1.9, -0.4]
+    position: [1.7, -0.4]
   - id: target_1
     position: [2.2, -1.5]
   - id: target_2
     position: [3.5, -1.2]
   - id: target_3
     position: [-2.5, 0.0]
+  - id: target_4
+    position: [1.9, 1.4]

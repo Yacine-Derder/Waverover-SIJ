@@ -56,14 +56,13 @@ def test_current_separation_error_names_deterministically_ordered_ids(
             'robot_10': replace(snapshot.robots['robot_10'], x=0.26, y=0.1),
         },
     )
-    with pytest.raises(SafetyViolation) as caught:
-        validate_controller_result(
-            example_config, close_snapshot, safe_result(close_snapshot), 10.1
-        )
-    assert str(caught.value) == (
-        'Emergency current separation between robot_10 and robot_2 is 0.010 m, '
-        'below 0.350 m.'
+    events = validate_controller_result(
+        example_config, close_snapshot, safe_result(close_snapshot), 10.1
     )
+    assert events[0] == {
+        'kind': 'current', 'pair': ('robot_10', 'robot_2'),
+        'distance_m': pytest.approx(0.01),
+    }
 
 
 def test_immediate_separation_error_names_deterministically_ordered_ids(
@@ -74,17 +73,12 @@ def test_immediate_separation_error_names_deterministically_ordered_ids(
         'robot_2': (1.01, 1.0),
         'robot_10': (1.0, 1.0),
     }
-    with pytest.raises(SafetyViolation) as caught:
-        validate_controller_result(
-            example_config,
-            snapshot,
-            ControllerResult(setpoints=points, created_at=10.0),
-            10.1,
-        )
-    assert str(caught.value) == (
-        'Immediate predicted separation between robot_10 and robot_2 is '
-        '0.010 m, below 0.350 m.'
+    events = validate_controller_result(
+        example_config, snapshot,
+        ControllerResult(setpoints=points, created_at=10.0), 10.1,
     )
+    assert events[0]['kind'] == 'proposed'
+    assert events[0]['pair'] == ('robot_10', 'robot_2')
 
 
 def test_predicted_separation_error_names_ids_and_path_step(
@@ -100,20 +94,16 @@ def test_predicted_separation_error_names_ids_and_path_step(
         key: (state.position, state.position, collision_points[key])
         for key, state in snapshot.robots.items()
     }
-    with pytest.raises(SafetyViolation) as caught:
-        validate_controller_result(
-            example_config,
-            snapshot,
-            ControllerResult(
-                setpoints={key: state.position for key, state in snapshot.robots.items()},
-                predicted_paths=paths,
-                created_at=10.0,
-            ),
-            10.1,
-        )
-    assert str(caught.value) == (
-        'Predicted separation between robot_10 and robot_2 at path step 2 is '
-        '0.000 m, below 0.350 m.'
+    events = validate_controller_result(
+        example_config, snapshot,
+        ControllerResult(
+            setpoints={key: state.position for key, state in snapshot.robots.items()},
+            predicted_paths=paths, created_at=10.0,
+        ), 10.1,
+    )
+    assert any(
+        event['kind'] == 'predicted' and event.get('step') == 2
+        for event in events
     )
 
 

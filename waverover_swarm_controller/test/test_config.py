@@ -27,6 +27,13 @@ def test_calibrated_defaults_and_pc_robot_ids():
     assert config.waypoint_dispatch.active_waypoint_warning_sec == pytest.approx(
         10.0
     )
+    assert config.waypoint_dispatch.repeated_destination_epsilon_m == (
+        pytest.approx(0.05)
+    )
+    assert config.waypoint_dispatch.completed_destination_reissue_distance_m == (
+        pytest.approx(0.30)
+    )
+    assert config.target_dynamics.switch_period_sec == pytest.approx(20.0)
     assert config.safety.dry_run
     assert config.synthetic_mcs.mode == 'static'
     assert config.synthetic_mcs.formation_coupling == 'rigid'
@@ -63,6 +70,31 @@ def test_missing_pipeline_sections_keep_backward_compatible_defaults(tmp_path):
     assert config.synthetic_mcs.initial_radius_m == pytest.approx(0.5)
     assert config.recording.profile == 'core'
     assert config.analysis.connectivity_alpha == pytest.approx(5.0)
+
+
+def test_absent_target_switch_period_defaults_to_twenty_seconds(tmp_path):
+    source = yaml.safe_load(example_path().read_text(encoding='utf-8'))
+    source['targets_file'] = str(
+        Path(__file__).parents[1] / 'config' / 'targets.yaml'
+    )
+    source['target_dynamics'].pop('switch_period_sec')
+    experiment = tmp_path / 'default-switch.yaml'
+    experiment.write_text(yaml.safe_dump(source), encoding='utf-8')
+
+    assert load_experiment(
+        experiment
+    ).target_dynamics.switch_period_sec == pytest.approx(20.0)
+
+
+def test_real_experiments_use_best_effort_thirty_centimeter_separation():
+    config_dir = Path(__file__).parents[1] / 'config'
+    real_paths = sorted(config_dir.glob('*_real.yaml'))
+    assert real_paths
+    for path in real_paths:
+        config = load_experiment(path)
+        assert config.target_dynamics.switch_period_sec == pytest.approx(20.0)
+        assert config.safety.collision_policy == 'best_effort'
+        assert config.safety.preferred_separation_m == pytest.approx(0.30)
 
 
 def test_legacy_active_timeout_is_accepted_as_nonfatal_warning_alias(tmp_path):

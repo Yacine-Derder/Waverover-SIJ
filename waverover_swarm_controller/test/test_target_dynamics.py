@@ -13,9 +13,11 @@ def targets(order=('target_2', 'target_0', 'target_1')):
 
 def sequence(config, order=('target_2', 'target_0', 'target_1')):
     manager = TargetManager(targets(order), config, start_time=100.0)
+    period = config.switch_period_sec
     return [
         manager.snapshot(now)[1]['priority_target_id']
-        for now in (100.0, 110.0, 120.0, 150.0)
+        for now in (100.0, 100.0 + period, 100.0 + 2 * period,
+                    100.0 + 5 * period)
     ]
 
 

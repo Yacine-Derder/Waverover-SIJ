@@ -2,7 +2,7 @@
 #include <QString>
 #include <QSerialPort>
 #include <QObject>
-#include <mutex>
+#include <QDateTime>
 
 
 class UARTSerialPort : public QObject {
@@ -14,19 +14,40 @@ class UARTSerialPort : public QObject {
 
         bool isAvailable();
 
+        quint64 successfulWrites() const { return _successfulWrites; }
+        quint64 failedWrites() const { return _failedWrites; }
+        quint64 timeouts() const { return _timeouts; }
+        quint64 reopenAttempts() const { return _reopenAttempts; }
+        int consecutiveFailures() const { return _consecutiveFailures; }
+        qint64 lastSuccessfulWriteMs() const { return _lastSuccessfulWriteMs; }
+
     public slots:
-        void sendRequestSync(QString);
+        void enqueueVelocity(QString);
+        void enqueueOrdered(QString);
+        void flushLatestVelocity();
         bool readResponse();
 
     signals:
         void LineReceived(QString line);
+        void Reopened();
 
     private:
         QSerialPort _serial;
         QByteArray _lineBuffer;
 
-        std::mutex _serial_mutex;
-
-        const int _writeTimeout = 10000;
+        bool writeNow(const QString& text);
+        bool reopen();
+        QString _path;
+        int _baudrate;
+        QString _latestVelocity;
+        bool _velocityFlushScheduled = false;
+        quint64 _successfulWrites = 0;
+        quint64 _failedWrites = 0;
+        quint64 _timeouts = 0;
+        quint64 _reopenAttempts = 0;
+        int _consecutiveFailures = 0;
+        qint64 _lastSuccessfulWriteMs = 0;
+        const int _writeTimeout = 100;
+        const int _maximumReopenAttempts = 3;
 
 };

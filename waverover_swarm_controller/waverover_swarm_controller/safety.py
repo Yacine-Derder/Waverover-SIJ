@@ -1,7 +1,7 @@
 """Conservative pre-dispatch safety validation."""
 
-import math
 from itertools import combinations
+import math
 
 
 class SafetyViolation(RuntimeError):
@@ -22,6 +22,7 @@ def _minimum_pairwise_separation(points_by_id):
 
 
 def validate_controller_result(config, snapshot, result, now):
+    collision_events = []
     if snapshot.frame_id != 'robotics_lab':
         raise SafetyViolation('Snapshot frame is not robotics_lab.')
     if now - result.created_at > config.safety.controller_result_timeout_sec:
@@ -53,30 +54,18 @@ def validate_controller_result(config, snapshot, result, now):
         }
     )
     if current_distance < config.safety.minimum_separation_m:
-        raise SafetyViolation(
-            'Emergency current separation between %s and %s is %.3f m, '
-            'below %.3f m.'
-            % (
-                current_first,
-                current_second,
-                current_distance,
-                config.safety.minimum_separation_m,
-            )
-        )
+        collision_events.append({
+            'kind': 'current', 'pair': (current_first, current_second),
+            'distance_m': current_distance,
+        })
     proposed_distance, proposed_first, proposed_second = (
         _minimum_pairwise_separation(result.setpoints)
     )
     if proposed_distance < config.safety.minimum_separation_m:
-        raise SafetyViolation(
-            'Immediate predicted separation between %s and %s is %.3f m, '
-            'below %.3f m.'
-            % (
-                proposed_first,
-                proposed_second,
-                proposed_distance,
-                config.safety.minimum_separation_m,
-            )
-        )
+        collision_events.append({
+            'kind': 'proposed', 'pair': (proposed_first, proposed_second),
+            'distance_m': proposed_distance,
+        })
 
     paths = result.predicted_paths
     if paths:
@@ -113,19 +102,12 @@ def validate_controller_result(config, snapshot, result, now):
                 positions
             )
             if separation < config.safety.minimum_separation_m:
-                raise SafetyViolation(
-                    'Predicted separation between %s and %s at path step %d '
-                    'is %.3f m, below %.3f m.'
-                    % (
-                        first_id,
-                        second_id,
-                        step,
-                        separation,
-                        config.safety.minimum_separation_m,
-                    )
-                )
+                collision_events.append({
+                    'kind': 'predicted', 'pair': (first_id, second_id),
+                    'distance_m': separation, 'step': step,
+                })
     valid_nodes = expected | {snapshot.station.station_id}
     for edge in result.selected_edges:
         if edge[0] not in valid_nodes or edge[1] not in valid_nodes:
             raise SafetyViolation('Selected edge references an unknown node.')
-    return True
+    return collision_events or True

@@ -100,6 +100,7 @@ class ControllerResult:
     diagnostic: str = ''
     created_at: float = 0.0
     target_epoch: int = 0
+    collision_repair: Mapping = field(default_factory=dict)
 
     def __post_init__(self):
         object.__setattr__(self, 'setpoints', _frozen_mapping(self.setpoints))
@@ -116,6 +117,9 @@ class ControllerResult:
             'predicted_paths',
             _frozen_mapping(self.predicted_paths),
         )
+        object.__setattr__(self, 'collision_repair', _frozen_mapping(
+            self.collision_repair
+        ))
         canonical_edges = tuple(
             sorted((str(first), str(second)) for first, second in self.selected_edges)
         )

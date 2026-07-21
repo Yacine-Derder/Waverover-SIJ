@@ -327,22 +327,22 @@ def test_safety_rejected_optimization_never_reaches_dispatch_and_recovers(
 
     SwarmCoordinator._control_cycle(coordinator)
 
-    assert coordinator.latest_result is None
-    assert coordinator.latest_rejected_result is rejected
-    assert dispatcher.pending_updates == []
-    assert counters['dispatch'] == 0
-    assert counters['visualization'] == 0
-    assert 'Immediate predicted separation' in coordinator.latest_stop_reason
+    assert coordinator.latest_result is not None
+    assert coordinator.latest_rejected_result is None
+    assert len(dispatcher.pending_updates) == 1
+    assert counters['dispatch'] == 1
+    assert counters['visualization'] == 1
+    assert coordinator.latest_stop_reason == ''
 
     coordinator.controller = SimpleNamespace(compute=lambda _snapshot: valid)
     SwarmCoordinator._control_cycle(coordinator)
 
     assert coordinator.latest_stop_reason == ''
-    assert coordinator.latest_result is valid
+    assert coordinator.latest_result.setpoints == valid.setpoints
     assert coordinator.latest_rejected_result is None
-    assert dispatcher.pending_updates == [valid.setpoints]
-    assert counters['dispatch'] == 1
-    assert counters['visualization'] == 1
+    assert len(dispatcher.pending_updates) == 2
+    assert counters['dispatch'] == 2
+    assert counters['visualization'] == 2
 
 
 def test_rejected_solver_metadata_is_labeled_rejected_in_diagnostics():

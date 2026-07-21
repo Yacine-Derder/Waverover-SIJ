@@ -10,13 +10,26 @@ ROS2Subscriber::ROS2Subscriber() : rclcpp::Node("WaveRobotController") {
 
     _imu_frame_id = this->get_parameter("imu_frame_id").as_string();
     std::string imu_topic = this->get_parameter("imu_topic").as_string();
+    const std::string serialHealthTopic = this->declare_parameter<std::string>(
+        "serial_health_topic", "serial_health"
+    );
 
     _imu_publisher = this->create_publisher<sensor_msgs::msg::Imu>(
         imu_topic,
         rclcpp::SensorDataQoS().reliable()
     );
+    _serial_health_publisher = this->create_publisher<std_msgs::msg::String>(
+        serialHealthTopic, rclcpp::QoS(10).reliable()
+    );
 
     qDebug() << "ROS2 Node initialized.";
+}
+
+void ROS2Subscriber::PublishSerialHealth(const std::string& payload)
+{
+    std_msgs::msg::String message;
+    message.data = payload;
+    _serial_health_publisher->publish(message);
 }
 
 bool ROS2Subscriber::SubscribeToTopic(
@@ -28,7 +41,6 @@ bool ROS2Subscriber::SubscribeToTopic(
         topic.toStdString(),
         rclcpp::SensorDataQoS().reliable(),
         [callback](const geometry_msgs::msg::Twist::SharedPtr msg) {
-            std::cout << " >>> ";
             callback(msg);
         }
     );

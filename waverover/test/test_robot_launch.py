@@ -47,6 +47,7 @@ def test_slam_mode_selects_slam_pipeline_and_waypoint_controller():
         'rf2o',
         'slam',
         'bridge',
+        'health_monitor',
         'waypoint_controller',
     )
 
@@ -62,6 +63,7 @@ def test_mcs_mode_selects_only_bridge_and_waypoint_controller():
     ]
     assert module.selected_onboard_components('MCS') == (
         'bridge',
+        'health_monitor',
         'waypoint_controller',
     )
 

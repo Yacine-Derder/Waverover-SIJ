@@ -1,12 +1,14 @@
 """Pure pairwise geometry for conservative convex collision constraints."""
 
 from dataclasses import dataclass
+import hashlib
 from itertools import combinations
 import math
 
 
 SEPARATION_NUMERIC_MARGIN_M = 1e-3
 _COINCIDENT_TOLERANCE_M = 1e-12
+SEPARATION_SLACK_PENALTY = 1000.0
 
 
 class CollisionGeometryError(ValueError):
@@ -19,6 +21,48 @@ class PairwiseGeometry:
     second_id: str
     distance: float
     normal: tuple
+
+
+def stable_separation_normal(first_id, second_id, positions, target_epoch=0):
+    """Return a finite deterministic normal, including coincident points."""
+    first = positions[first_id]
+    second = positions[second_id]
+    dx = float(first[0]) - float(second[0])
+    dy = float(first[1]) - float(second[1])
+    distance = math.hypot(dx, dy)
+    if distance > _COINCIDENT_TOLERANCE_M:
+        return dx / distance, dy / distance
+    digest = hashlib.sha256(
+        ('%s|%s|%d' % (first_id, second_id, int(target_epoch))).encode()
+    ).digest()
+    angle = int.from_bytes(digest[:8], 'big') / 2**64 * 2.0 * math.pi
+    return math.cos(angle), math.sin(angle)
+
+
+def centralized_soft_separation(
+    positions, robot_ids, current_positions, preferred_separation,
+    target_epoch=0,
+):
+    """Return affine preferred-separation constraints and penalized slack."""
+    import cvxpy as cp
+
+    pairs = tuple(combinations(sorted(robot_ids), 2))
+    if not pairs or int(positions.shape[0]) <= 1:
+        return (), 0.0
+    slack = cp.Variable((int(positions.shape[0]) - 1, len(pairs)), nonneg=True)
+    index = {robot_id: value for value, robot_id in enumerate(robot_ids)}
+    constraints = []
+    for pair_index, (first, second) in enumerate(pairs):
+        normal = stable_separation_normal(
+            first, second, current_positions, target_epoch
+        )
+        for step in range(1, int(positions.shape[0])):
+            difference = positions[step, index[first]] - positions[step, index[second]]
+            constraints.append(
+                normal[0] * difference[0] + normal[1] * difference[1]
+                + slack[step - 1, pair_index] >= preferred_separation
+            )
+    return tuple(constraints), SEPARATION_SLACK_PENALTY * cp.sum(slack)
 
 
 def pairwise_geometries(positions, minimum_separation):

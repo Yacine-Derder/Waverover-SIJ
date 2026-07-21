@@ -10,7 +10,7 @@ from .metrics import (
 )
 
 
-CONTROLLER_TELEMETRY_SCHEMA_VERSION = 4
+CONTROLLER_TELEMETRY_SCHEMA_VERSION = 5
 
 
 def _point(point):
@@ -198,6 +198,17 @@ def build_controller_telemetry(
                     'unmatched_acknowledgement_count', 0
                 )),
                 'handoff_cause': values.get('handoff_cause', 'none'),
+                'suppression_reason': values.get('suppression_reason', ''),
+                'suppression_count': int(values.get('suppression_count', 0)),
+                'last_failed_token': values.get('last_failed_token'),
+                'last_failed_waypoint': (
+                    None if values.get('last_failed_waypoint') is None else
+                    _point(values['last_failed_waypoint'])
+                ),
+                'failure_count': int(values.get('failure_count', 0)),
+                'unmatched_failure_count': int(values.get(
+                    'unmatched_failure_count', 0
+                )),
                 'active_target_epoch': int(values.get(
                     'active_target_epoch', 0
                 )),
@@ -222,6 +233,11 @@ def build_controller_telemetry(
             if result is not None and result.target_assignments else None
         ),
         'solver_status': result.solver_status if result is not None else None,
+        'collision_policy': config.safety.collision_policy,
+        'preferred_separation_m': config.safety.preferred_separation_m,
+        'waypoint_separation_repair': (
+            dict(result.collision_repair) if result is not None else {}
+        ),
         'solve_duration_sec': (
             _finite_or_none(result.solve_duration_sec)
             if result is not None else None

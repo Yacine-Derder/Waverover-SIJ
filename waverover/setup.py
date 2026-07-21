@@ -36,6 +36,7 @@ setup(
         'console_scripts': [
             'waverover_manual_lr = waverover.namespaced_manual_lr:main',
             'waverover_teleop = waverover.namespaced_teleop:main',
+            'waverover_health_monitor = waverover.health_monitor:main',
         ],
     },
 )

@@ -1,5 +1,9 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import (
+    DeclareLaunchArgument, EmitEvent, OpaqueFunction, RegisterEventHandler,
+)
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -59,6 +63,8 @@ def _launch_waypoint_controller(context):
         'cmd_vel_topic': topics['cmd_vel'],
         'waypoint_topic': topics['waypoints'],
         'waypoint_reached_topic': topics['waypoint_reached'],
+        'waypoint_failed_topic': topics['waypoint_failed'],
+        'navigation_status_topic': topics['navigation_status'],
         'end_trial_topic': topics['end_trial'],
         'mcs_pose_topic': selected_mcs_topic,
         'mcs_pose_timeout_sec': ParameterValue(
@@ -68,7 +74,7 @@ def _launch_waypoint_controller(context):
         'mcs_qos_depth': int(mcs['qos_depth']),
     }]
 
-    return [Node(
+    controller_node = Node(
         package='waverover_controller',
         executable='waypoint_controller',
         name=required(STACK_DEFAULTS, 'nodes', 'waypoint_controller'),
@@ -79,7 +85,16 @@ def _launch_waypoint_controller(context):
             ('tf', topics['tf']),
             ('tf_static', topics['tf_static']),
         ],
-    )]
+    )
+    return [
+        controller_node,
+        RegisterEventHandler(OnProcessExit(
+            target_action=controller_node,
+            on_exit=[EmitEvent(event=Shutdown(
+                reason='critical waypoint controller exited'
+            ))],
+        )),
+    ]
 
 
 def generate_launch_description():

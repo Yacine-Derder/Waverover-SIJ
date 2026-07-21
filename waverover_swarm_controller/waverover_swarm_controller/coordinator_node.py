@@ -1,5 +1,7 @@
 """ROS boundary for the operator-PC swarm coordinator."""
 
+from dataclasses import asdict, replace
+import json
 import signal
 import time
 
@@ -17,13 +19,17 @@ from waverover.stack_config import robot_namespace
 
 from .config import ConfigError, load_experiment
 from .controllers import controller_from_config
-from .controllers.base import ControllerUnavailableError
+from .controllers.base import (
+    ControllerUnavailableError,
+    replace_first_future_points,
+)
 from .metrics import algebraic_connectivity, minimum_pairwise_distance
 from .pose_aggregation import PoseAggregator, SnapshotUnavailableError
 from .safety import SafetyViolation, validate_controller_result
-from .telemetry import build_controller_telemetry, canonical_json
 from .target_dynamics import TargetManager
+from .telemetry import build_controller_telemetry, canonical_json
 from .waypoint_dispatcher import WaypointDispatcher
+from .waypoint_repair import repair_waypoints
 
 
 def predicted_path_topic(stack_config, robot_id):
@@ -64,9 +70,11 @@ class SwarmCoordinator(Node):
         self.latest_snapshot = None
         self.latest_stop_reason = 'startup: awaiting fresh synchronized poses'
         self.latest_handoff = 'none'
+        self.latest_collision_events = []
         self._cleanup_complete = False
         self._end_sent_for_stop = False
         self._ack_warning_times = {}
+        self.onboard_health = {}
 
         # The PC intentionally loads fleet naming without rover-local identity.
         from waverover.stack_config import (
@@ -89,6 +97,8 @@ class SwarmCoordinator(Node):
         self.end_trial_publishers = {}
         self.pose_subscriptions = []
         self.acknowledgement_subscriptions = []
+        self.failure_subscriptions = []
+        self.health_subscriptions = []
         for robot_id in self.config.robot_ids:
             self.waypoint_publishers[robot_id] = self.create_publisher(
                 PointStamped,
@@ -113,6 +123,22 @@ class SwarmCoordinator(Node):
                 PointStamped,
                 robot_topic(stack_config, 'waypoint_reached', robot_id),
                 lambda message, selected=robot_id: self._acknowledgement(
+                    selected, message
+                ),
+                reliable,
+            ))
+            self.failure_subscriptions.append(self.create_subscription(
+                PointStamped,
+                robot_topic(stack_config, 'waypoint_failed', robot_id),
+                lambda message, selected=robot_id: self._waypoint_failed(
+                    selected, message
+                ),
+                reliable,
+            ))
+            self.health_subscriptions.append(self.create_subscription(
+                String,
+                robot_topic(stack_config, 'health', robot_id),
+                lambda message, selected=robot_id: self._onboard_health(
                     selected, message
                 ),
                 reliable,
@@ -195,14 +221,55 @@ class SwarmCoordinator(Node):
     def _compute_valid_result(self, snapshot):
         result = self.controller.compute(snapshot)
         try:
-            validate_controller_result(
+            collision_validation = validate_controller_result(
                 self.config, snapshot, result, time.monotonic()
+            )
+            self.latest_collision_events = (
+                [] if collision_validation is True else collision_validation
             )
         except SafetyViolation:
             self.latest_rejected_result = result
             raise
         self.latest_rejected_result = None
         return result
+
+    def _repair_result(self, snapshot, result):
+        active = {
+            robot_id: state.active_waypoint
+            for robot_id, state in getattr(
+                self.dispatcher, 'states', {}
+            ).items()
+            if state.active_waypoint is not None
+        }
+        repaired, report = repair_waypoints(
+            result.setpoints,
+            active,
+            self.config.safety.geofence,
+            self.config.safety.preferred_separation_m,
+            self.config.safety.collision_repair_max_iterations,
+            snapshot.target_epoch,
+        )
+        paths = replace_first_future_points(result.predicted_paths, repaired)
+        metadata = asdict(report)
+        metadata['controller_output_repair'] = dict(result.collision_repair)
+        metadata['collision_events'] = tuple(getattr(
+            self, 'latest_collision_events', ()
+        ))
+        metadata['predicted_paths_after_first_step'] = 'pre_repair'
+        if report.residual_violation_m > 1e-6:
+            logger = self.get_logger() if hasattr(self, 'get_logger') else None
+            if logger is not None:
+                logger.warn(
+                    'Best-effort waypoint separation has %.3f m residual; '
+                    'continuing with finite geofence-valid least-violating '
+                    'output.' % report.residual_violation_m
+                )
+        return replace(
+            result,
+            setpoints=repaired,
+            predicted_paths=paths,
+            collision_repair=metadata,
+        )
 
     def _control_cycle(self):
         try:
@@ -216,6 +283,8 @@ class SwarmCoordinator(Node):
             return
         try:
             result = self._compute_valid_result(snapshot)
+            if hasattr(self, 'config'):
+                result = SwarmCoordinator._repair_result(self, snapshot, result)
         except (
             SafetyViolation,
             ControllerUnavailableError,
@@ -284,6 +353,11 @@ class SwarmCoordinator(Node):
             (message.point.x, message.point.y),
             time.monotonic(),
             self.config.frame_id,
+            measured_position=(
+                self.latest_snapshot.robots[robot_id].position
+                if self.latest_snapshot is not None and
+                robot_id in self.latest_snapshot.robots else None
+            ),
         )
         if not actions:
             state = self.dispatcher.states[robot_id]
@@ -300,6 +374,37 @@ class SwarmCoordinator(Node):
             return
         for action in actions:
             self._publish_dispatch_action(action)
+
+    def _waypoint_failed(self, robot_id, message):
+        token = (int(message.header.stamp.sec), int(message.header.stamp.nanosec))
+        matched = self.dispatcher.fail(
+            robot_id,
+            str(message.header.frame_id).strip(),
+            token,
+            (message.point.x, message.point.y),
+            time.monotonic(),
+            self.config.frame_id,
+        )
+        if matched:
+            self.latest_handoff = (
+                'navigation_stalled robot=%s token=%d.%09d' % (
+                    robot_id, token[0], token[1]
+                )
+            )
+            self.get_logger().error(self.latest_handoff)
+        else:
+            self.get_logger().warn(
+                'Ignored unmatched/stale waypoint_failed robot=%s '
+                'token=%d.%09d.' % (robot_id, token[0], token[1])
+            )
+
+    def _onboard_health(self, robot_id, message):
+        try:
+            self.onboard_health[robot_id] = json.loads(message.data)
+        except (ValueError, TypeError):
+            self.onboard_health[robot_id] = {
+                'state': 'degraded', 'restart_reason': 'malformed_health'
+            }
 
     def _publish_target_state(self, snapshot):
         self._publish_target_values(snapshot.targets.values(), self._target_state)
@@ -394,6 +499,27 @@ class SwarmCoordinator(Node):
                 'pending_target_epoch',
             ):
                 values[field + '_' + robot_id] = str(dispatch[field])
+            health = getattr(self, 'onboard_health', {}).get(robot_id)
+            values['onboard_health_' + robot_id] = (
+                'missing' if health is None else health.get('state', 'unknown')
+            )
+            values['onboard_restart_reason_' + robot_id] = (
+                '' if health is None else health.get('restart_reason', '')
+            )
+            values['waypoint_publisher_count_' + robot_id] = (
+                'unknown' if health is None else
+                health.get('waypoint_publisher_count', 'unknown')
+            )
+            values['controller_navigation_state_' + robot_id] = (
+                'unknown' if health is None else
+                health.get('controller_navigation_state', 'unknown')
+            )
+            serial = {} if health is None else health.get(
+                'serial_counters', {}
+            )
+            values['serial_consecutive_failures_' + robot_id] = serial.get(
+                'consecutive_failures', 'unknown'
+            )
         if self.latest_snapshot is not None:
             values['priority_target_id'] = str(
                 self.latest_snapshot.priority_target_id

@@ -1,5 +1,11 @@
 # ros2waverover
 
+Every UART operation runs in the `QSerialPort` owner Qt thread. Velocity
+commands use a latest-command mailbox, configuration commands remain ordered,
+and writes use a 100 ms deadline. The namespaced `serial_health` topic reports
+write/reopen/malformed-frame counters and timestamps. Bounded recovery
+reapplies IMU configuration; exhaustion exits nonzero for systemd recovery.
+
 This is a ROS 2 UART bridge for Waveshare Wave Rover.
 
 It subscribes to namespaced `cmd_vel`, sends JSON velocity commands to the

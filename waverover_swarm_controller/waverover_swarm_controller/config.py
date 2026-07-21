@@ -54,6 +54,8 @@ class ControllerConfig:
 class DispatchConfig:
     refresh_period_sec: float
     active_waypoint_warning_sec: float
+    repeated_destination_epsilon_m: float = 0.05
+    completed_destination_reissue_distance_m: float = 0.30
     reached_distance_m: float = 0.0
     handoff_delay_sec: float = 0.0
 
@@ -90,9 +92,16 @@ class GeofenceConfig:
 @dataclass(frozen=True)
 class SafetyConfig:
     dry_run: bool
-    minimum_separation_m: float
+    preferred_separation_m: float
+    collision_policy: str
+    collision_repair_max_iterations: int
     controller_result_timeout_sec: float
     geofence: GeofenceConfig
+
+    @property
+    def minimum_separation_m(self):
+        """Backward-compatible name; separation is preferred, not fatal."""
+        return self.preferred_separation_m
 
 
 @dataclass(frozen=True)
@@ -337,6 +346,14 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
         dry_run = bool(dry_run_override)
     if not isinstance(dry_run, bool):
         raise ConfigError('safety.dry_run must be boolean.')
+    collision_policy = str(
+        safety_data.get('collision_policy', 'best_effort')
+    ).strip().lower()
+    if collision_policy != 'best_effort':
+        raise ConfigError('safety.collision_policy must be best_effort.')
+    preferred_separation = safety_data.get(
+        'preferred_separation_m', safety_data.get('minimum_separation_m', 0.30)
+    )
 
     synthetic_mode = str(synthetic_data.get('mode', 'static')).strip().lower()
     if synthetic_mode not in (
@@ -547,7 +564,7 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
         target_dynamics=TargetDynamicsConfig(
             mode=dynamics_mode,
             switch_period_sec=_finite(
-                dynamics_data.get('switch_period_sec', 10.0),
+                dynamics_data.get('switch_period_sec', 20.0),
                 'target_dynamics.switch_period_sec', positive=True,
             ),
             priority_weight=priority_weight,
@@ -559,10 +576,19 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
         vehicle=vehicle,
         controller=ControllerConfig(
             algorithm=algorithm,
-            control_period_sec=_finite(controller_data.get('control_period_sec'), 'controller.control_period_sec', positive=True),
+            control_period_sec=_finite(
+                controller_data.get('control_period_sec'),
+                'controller.control_period_sec', positive=True,
+            ),
             mpc_horizon=horizon,
-            mpc_max_step_m=_finite(controller_data.get('mpc_max_step_m'), 'controller.mpc_max_step_m', positive=True),
-            minimum_mpc_lookahead_m=_finite(controller_data.get('minimum_mpc_lookahead_m'), 'controller.minimum_mpc_lookahead_m', positive=True),
+            mpc_max_step_m=_finite(
+                controller_data.get('mpc_max_step_m'),
+                'controller.mpc_max_step_m', positive=True,
+            ),
+            minimum_mpc_lookahead_m=_finite(
+                controller_data.get('minimum_mpc_lookahead_m'),
+                'controller.minimum_mpc_lookahead_m', positive=True,
+            ),
             deterministic_seed=controller_seed,
             distributed_update_semantics=semantics,
         ),
@@ -580,14 +606,38 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
                 'waypoint_dispatch.active_waypoint_warning_sec',
                 positive=True,
             ),
+            repeated_destination_epsilon_m=_finite(
+                dispatch_data.get('repeated_destination_epsilon_m', 0.05),
+                'waypoint_dispatch.repeated_destination_epsilon_m',
+                positive=True,
+            ),
+            completed_destination_reissue_distance_m=_finite(
+                dispatch_data.get(
+                    'completed_destination_reissue_distance_m', 0.30
+                ),
+                'waypoint_dispatch.completed_destination_reissue_distance_m',
+                positive=True,
+            ),
             reached_distance_m=float(dispatch_data.get('reached_distance_m', 0.0)),
             handoff_delay_sec=float(dispatch_data.get('handoff_delay_sec', 0.0)),
         ),
         communication=CommunicationConfig(ideal_range, maximum_range),
         safety=SafetyConfig(
             dry_run=dry_run,
-            minimum_separation_m=_finite(safety_data.get('minimum_separation_m'), 'safety.minimum_separation_m', positive=True),
-            controller_result_timeout_sec=_finite(safety_data.get('controller_result_timeout_sec', 2.5), 'safety.controller_result_timeout_sec', positive=True),
+            preferred_separation_m=_finite(
+                preferred_separation,
+                'safety.preferred_separation_m',
+                positive=True,
+            ),
+            collision_policy=collision_policy,
+            collision_repair_max_iterations=_positive_integer(
+                safety_data.get('collision_repair_max_iterations', 50),
+                'safety.collision_repair_max_iterations',
+            ),
+            controller_result_timeout_sec=_finite(
+                safety_data.get('controller_result_timeout_sec', 2.5),
+                'safety.controller_result_timeout_sec', positive=True,
+            ),
             geofence=geofence,
         ),
         synthetic_mcs=SyntheticMcsConfig(

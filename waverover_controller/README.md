@@ -1,5 +1,11 @@
 # WaveRover waypoint controller
 
+MCS supplies approximately 60 Hz poses and the configurable onboard loop
+defaults to 30 Hz. `goal_tolerance_m` remains 0.05 m. Progress is tracked per
+stamp token; stalled navigation uses bounded straight escapes, then publishes
+`waypoint_failed` with the original frame, token, and coordinates if recovery
+is exhausted. Recovery never fabricates a reached acknowledgement.
+
 The controller consumes a reliable FIFO stream of
 `geometry_msgs/msg/PointStamped` waypoints and publishes namespaced Twist
 commands. Defaults come from `waverover/config/robot_defaults.yaml`; both the

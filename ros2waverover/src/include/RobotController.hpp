@@ -8,6 +8,7 @@
 #include <geometry_msgs/msg/twist.hpp>
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <chrono>
+#include <cstdint>
 #include <string>
 
 class UARTSerialPort;
@@ -26,7 +27,8 @@ public slots:
         void SerialLineReceived(QString line);
 
     signals:
-        void SendRequestSync(QString);
+        void SendVelocityRequest(QString);
+        void SendOrderedRequest(QString);
 
     private:
         enum class ControlMode {
@@ -40,11 +42,13 @@ public slots:
         std::unique_ptr<std::thread> _execThread;
         rclcpp::Executor::SharedPtr _executor;
         QTimer* _serialReadTimer;
+        QTimer* _serialHealthTimer;
         void LoadControlParameters();
         void RunRos2Exectutor();
         void SetupControlSubscriptions();
         void ConfigureImuStream();
         void PublishImuFrame(const QString& line);
+        void PublishSerialHealth();
         bool SendVelocityCommand(double linear_x, double angular_z);
         bool SendLeftRightVelocityCommand(double left, double right);
         bool SendFixedWingCmdVel(const geometry_msgs::msg::Twist& msg);
@@ -63,4 +67,6 @@ public slots:
         rclcpp::TimerBase::SharedPtr _manualTimeoutTimer;
         bool _enableImuStream = true;
         int _imuRateHz = 50;
+        std::uint64_t _malformedImuFrames = 0;
+        std::int64_t _lastValidImuFrameMs = 0;
 };

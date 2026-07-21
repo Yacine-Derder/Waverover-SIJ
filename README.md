@@ -653,6 +653,38 @@ git diff --check
 The updater tests use temporary fake repositories and builds. They do not
 update the live rover workspace.
 
+## Reliability behavior
+
+The external MCS pose stream is approximately 60 Hz and the onboard waypoint
+loop defaults to 30 Hz, so control does not run ahead of fresh measurements.
+The 0.05 m goal tolerance remains intentional. After an exact token/frame/point
+acknowledgement, another same-epoch destination within 0.05 m continues loiter
+without a new token while measured drift remains within 0.30 m.
+
+An active token with less than 0.03 m progress for 3 seconds enters a bounded
+0.75 second straight escape. Three unsuccessful attempts produce an exact,
+token-preserving `waypoint_failed`, not a false reached acknowledgement.
+
+Real dispatch uses 0.30 m best-effort separation. Every algorithm shares one
+deterministic geofence-aware repair stage. Collision observations are recorded
+but cannot send `end_trial`; malformed, stale, non-finite, frame-invalid, and
+geofence-invalid data still fail closed. Target priority switches every 20
+seconds by default.
+
+All UART access runs in the owning Qt thread. Velocity writes are coalesced,
+configuration writes stay ordered, and bounded reopen exhaustion exits the
+bridge so rate-limited systemd recovery can restart the stack. The watchdog
+uses local `cmd_vel` and enabled-IMU freshness; MCS age and waypoint publisher
+count are informational, and waiting/loiter/trial-ended/manual states are not
+restart predicates.
+
+```bash
+ros2 topic echo /waverover_<id>/health
+ros2 topic echo /waverover_<id>/serial_health
+systemctl show waverover.service -p NRestarts -p Result
+journalctl -u waverover.service -b -n 200 --no-pager
+```
+
 ## Troubleshooting
 
 ### `Package 'waverover' not found`

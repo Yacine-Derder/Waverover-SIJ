@@ -5,21 +5,18 @@ import time
 
 import numpy as np
 
-from ..models import ControllerResult
 from .base import (
     ControllerUnavailableError,
-    SwarmController,
     optional_dependency,
     replace_first_future_points,
+    SwarmController,
 )
-from .collision_avoidance import (
-    centralized_separation_constraints,
-    points_satisfy_centralized_planes,
-)
+from .collision_avoidance import centralized_soft_separation
+from ..models import ControllerResult
 
 
 def _tree_edges(snapshot):
-    remaining = set(sorted(snapshot.robots))
+    remaining = set(snapshot.robots)
     connected = {snapshot.station.station_id: snapshot.station.position}
     edges = []
     while remaining:
@@ -128,16 +125,21 @@ class ConvexController(SwarmController):
         ])
         positions = cp.Variable((horizon_steps + 1, count, 2))
         constraints = [positions[0] == current]
-        constraints.extend(centralized_separation_constraints(
-            positions,
-            robot_ids,
-            {
-                robot_id: snapshot.robots[robot_id].position
-                for robot_id in robot_ids
-            },
-            self.config.safety.minimum_separation_m,
-        ))
         objective = 0
+        separation_constraints, separation_penalty = (
+            centralized_soft_separation(
+                positions,
+                robot_ids,
+                {
+                    robot_id: snapshot.robots[robot_id].position
+                    for robot_id in robot_ids
+                },
+                self.config.safety.preferred_separation_m,
+                snapshot.target_epoch,
+            )
+        )
+        constraints.extend(separation_constraints)
+        objective += separation_penalty
         maximum_link = self.config.communication.maximum_range_m - (
             2.0 * self.config.vehicle.turn_radius_m
         )
@@ -187,19 +189,9 @@ class ConvexController(SwarmController):
             self.config.communication.maximum_range_m
             - self.config.vehicle.turn_radius_m,
         )
-        current_positions = {
-            robot_id: snapshot.robots[robot_id].position
-            for robot_id in robot_ids
-        }
-        setpoints = (
-            projected_setpoints
-            if points_satisfy_centralized_planes(
-                current_positions,
-                projected_setpoints,
-                self.config.safety.minimum_separation_m,
-            )
-            else optimized_setpoints
-        )
+        # Preferred collision separation is deliberately soft. Every
+        # controller result passes through the shared deterministic repair.
+        setpoints = projected_setpoints
         paths = replace_first_future_points(paths, setpoints)
         target_assignments = {
             robot_id: target.target_id

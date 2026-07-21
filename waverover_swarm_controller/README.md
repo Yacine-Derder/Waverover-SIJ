@@ -1,5 +1,13 @@
 # WaveRover swarm controller (operator PC only)
 
+The default target switch period is 20 seconds. Real dispatch treats 0.30 m
+separation as a best-effort preference and sends every algorithm through the
+same deterministic, geofence-aware repair stage. Collision warnings and
+residual violations are telemetry, not trial-latching faults; structural
+validation remains fail-closed. Exact acknowledgements enable same-epoch
+completed-destination hysteresis (0.05 m match, 0.30 m drift reissue), while
+exact `waypoint_failed` messages clear only the affected rover non-fatally.
+
 `waverover_swarm_controller` computes coordinated setpoints from external MCS
 poses and sends them through the existing per-rover waypoint controllers. The
 package is present and buildable in the shared repository on every machine,
@@ -159,7 +167,7 @@ belongs to the experiment configuration:
 ```yaml
 target_dynamics:
   mode: random_priority
-  switch_period_sec: 10.0
+  switch_period_sec: 20.0
   priority_weight: 10.0
   background_weight: 1.0
   seed: 2026

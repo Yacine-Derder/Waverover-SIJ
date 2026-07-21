@@ -1,6 +1,7 @@
 """Common interface and helpers for pure swarm controllers."""
 
 from abc import ABC, abstractmethod
+from dataclasses import asdict, replace
 import importlib.util
 import math
 
@@ -70,17 +71,57 @@ def controller_from_config(config):
     algorithm = config.controller.algorithm
     if algorithm == 'heuristic':
         from .heuristic import HeuristicController
-        return HeuristicController(config)
-    if algorithm == 'heuristic_decentralized':
+        controller = HeuristicController(config)
+    elif algorithm == 'heuristic_decentralized':
         from .heuristic_decentralized import DecentralizedHeuristicController
-        return DecentralizedHeuristicController(config)
-    if algorithm == 'convex':
+        controller = DecentralizedHeuristicController(config)
+    elif algorithm == 'convex':
         from .convex import ConvexController
-        return ConvexController(config)
-    if algorithm == 'mpc_centralized':
+        controller = ConvexController(config)
+    elif algorithm == 'mpc_centralized':
         from .mpc_centralized import CentralizedMpcController
-        return CentralizedMpcController(config)
-    if algorithm == 'mpc_distributed':
+        controller = CentralizedMpcController(config)
+    elif algorithm == 'mpc_distributed':
         from .mpc_distributed import DistributedMpcController
-        return DistributedMpcController(config)
-    raise ControllerUnavailableError('Unknown controller %s.' % algorithm)
+        controller = DistributedMpcController(config)
+    else:
+        raise ControllerUnavailableError('Unknown controller %s.' % algorithm)
+    return BestEffortRepairController(controller, config)
+
+
+class BestEffortRepairController:
+    """Apply identical final preferred-separation behavior to every solver."""
+
+    def __init__(self, controller, config):
+        object.__setattr__(self, '_controller', controller)
+        object.__setattr__(self, 'config', config)
+
+    def __getattr__(self, name):
+        return getattr(self._controller, name)
+
+    def __setattr__(self, name, value):
+        if name in ('_controller', 'config'):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._controller, name, value)
+
+    def compute(self, snapshot):
+        from ..waypoint_repair import repair_waypoints
+
+        result = self._controller.compute(snapshot)
+        repaired, report = repair_waypoints(
+            result.setpoints, {}, self.config.safety.geofence,
+            self.config.safety.preferred_separation_m,
+            self.config.safety.collision_repair_max_iterations,
+            snapshot.target_epoch,
+        )
+        metadata = asdict(report)
+        metadata['predicted_paths_after_first_step'] = 'pre_repair'
+        return replace(
+            result,
+            setpoints=repaired,
+            predicted_paths=replace_first_future_points(
+                result.predicted_paths, repaired
+            ),
+            collision_repair=metadata,
+        )

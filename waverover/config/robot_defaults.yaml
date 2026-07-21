@@ -21,6 +21,10 @@ topics:
   cmd_vel: cmd_vel
   waypoints: waypoints
   waypoint_reached: waypoint_reached
+  waypoint_failed: waypoint_failed
+  navigation_status: navigation_status
+  serial_health: serial_health
+  health: health
   end_trial: end_trial
   scan: scan
   imu: imu/data_raw
@@ -82,7 +86,8 @@ slam:
   transform_publish_period: 0.1
 
 waypoint_controller:
-  control_rate_hz: 10.0
+  # MCS produces fresh measurements at approximately 60 Hz.
+  control_rate_hz: 30.0
   goal_tolerance_m: 0.05
   heading_tolerance_deg: 15.0
   forward_linear_x: 0.25
@@ -90,6 +95,18 @@ waypoint_controller:
   final_loiter_direction: left
   cmd_vel_qos_depth: 10
   waypoint_qos_depth: 50
+  progress_timeout_sec: 3.0
+  minimum_progress_m: 0.03
+  recovery_straight_duration_sec: 0.75
+  maximum_recovery_attempts: 3
+
+watchdog:
+  enabled: true
+  startup_grace_sec: 15.0
+  cmd_vel_timeout_sec: 2.0
+  imu_timeout_sec: 2.0
+  consecutive_failure_checks: 3
+  check_period_sec: 1.0
 
 manual_lr_ui:
   publish_rate_hz: 10.0

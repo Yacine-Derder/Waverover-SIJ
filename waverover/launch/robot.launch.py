@@ -4,12 +4,18 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    EmitEvent,
     IncludeLaunchDescription,
     LogInfo,
     OpaqueFunction,
+    RegisterEventHandler,
 )
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.launch_description_sources import AnyLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 from waverover.stack_config import (
     launch_text,
@@ -17,6 +23,7 @@ from waverover.stack_config import (
     normalize_control_mode,
     normalize_pose_source,
     required,
+    robot_namespace,
     validate_robot_name,
 )
 
@@ -28,7 +35,7 @@ def selected_onboard_components(pose_source, control_mode='fixed_wing'):
     """Return logical components selected by the unified launch."""
     selected_source = normalize_pose_source(pose_source)
     selected_mode = normalize_control_mode(control_mode)
-    components = ['bridge']
+    components = ['bridge', 'health_monitor']
     if selected_source == 'SLAM':
         components[:0] = ['lidar', 'static_tf', 'rf2o', 'slam']
     if selected_mode != 'manual_lr':
@@ -105,6 +112,31 @@ def _launch_onboard_stack(context):
             'wave_rover_launch.py',
             bridge_arguments,
         ))
+
+    watchdog = required(STACK_DEFAULTS, 'watchdog')
+    if bool(watchdog['enabled']):
+        health_node = Node(
+            package='waverover',
+            executable='waverover_health_monitor',
+            name='health_monitor',
+            namespace=robot_namespace(STACK_DEFAULTS, robot_name),
+            output='screen',
+            parameters=[{
+                'control_mode': control_mode,
+                'enable_imu_stream': ParameterValue(
+                    LaunchConfiguration('enable_imu_stream'), value_type=bool
+                ),
+            }],
+        )
+        actions.extend([
+            health_node,
+            RegisterEventHandler(OnProcessExit(
+                target_action=health_node,
+                on_exit=[EmitEvent(event=Shutdown(
+                    reason='critical health watchdog exited'
+                ))],
+            )),
+        ])
 
     if control_mode == 'manual_lr':
         actions.append(LogInfo(msg=(

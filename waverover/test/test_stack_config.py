@@ -42,6 +42,12 @@ def test_shared_defaults_and_robot_derivation():
         '/waverover_30/end_trial'
     )
     assert config['waypoint_ui']['refresh_rate_hz'] == pytest.approx(1.0)
+    assert config['waypoint_controller']['control_rate_hz'] == pytest.approx(
+        30.0
+    )
+    assert config['waypoint_controller']['goal_tolerance_m'] == pytest.approx(
+        0.05
+    )
     assert robot_topic(config, 'tf', '30') == '/tf'
     assert mcs_pose_topic(config, '131') == (
         '/macortex_bridge/waverover_131/pose'

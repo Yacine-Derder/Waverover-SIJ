@@ -14,8 +14,8 @@ from .analysis_metrics import (
     descriptive_statistics,
     graph_metrics,
     integrate_series,
-    priority_target_distances,
     mission_cost,
+    priority_target_distances,
     separation_metrics,
 )
 from .offline_data import load_run_data
@@ -124,6 +124,12 @@ def compute_analysis(data):
             ),
             'stop_reason': sample.get('stop_reason', ''),
             'target_assignments': sample.get('target_assignments'),
+            'separation_repair_residual_m': sample.get(
+                'waypoint_separation_repair', {}
+            ).get('residual_violation_m'),
+            'separation_repair_fallback': bool(sample.get(
+                'waypoint_separation_repair', {}
+            ).get('least_violating_fallback', False)),
         })
     times = [row['elapsed_sec'] for row in rows]
     cost_values = [row['mission_cost_total'] for row in rows]
@@ -493,6 +499,15 @@ def compute_analysis(data):
             ]),
             'violation_count': violation_count,
             'violation_duration_sec': violation_duration,
+            # Kept alongside legacy violation names for report compatibility;
+            # these are best-effort preference warnings, not fatal events.
+            'preferred_separation_warning_count': violation_count,
+            'repair_residual_m': descriptive_statistics([
+                row['separation_repair_residual_m'] for row in rows
+            ]),
+            'least_violating_fallback_count': sum(
+                row['separation_repair_fallback'] for row in rows
+            ),
             'pairwise_distance_m': descriptive_statistics(pairwise_distances),
             'offending_pairs': sorted({
                 tuple(row['current_minimum_pair'])

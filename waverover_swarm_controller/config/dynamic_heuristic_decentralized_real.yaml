@@ -15,7 +15,7 @@ targets_file: targets_smoke_6.yaml
 
 target_dynamics:
   mode: random_priority
-  switch_period_sec: 10.0
+  switch_period_sec: 20.0
   priority_weight: 10.0
   background_weight: 1.0
   seed: 2026
@@ -47,7 +47,9 @@ communication:
 
 safety:
   dry_run: false
-  minimum_separation_m: 0.05
+  collision_policy: best_effort
+  preferred_separation_m: 0.30
+  collision_repair_max_iterations: 50
   controller_result_timeout_sec: 2.5
   geofence: {x_min: -4.0, x_max: 4.0, y_min: -4.0, y_max: 4.0}
 

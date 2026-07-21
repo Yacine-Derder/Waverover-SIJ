@@ -128,3 +128,48 @@ def test_overdue_active_waypoint_warns_but_refreshes_without_fault(
                for value in observed.values())
     assert all(value['last_publication_age_sec'] == 0.0
                for value in observed.values())
+
+
+def test_completed_destination_hysteresis_and_real_drift(example_config, snapshot):
+    dispatcher = WaypointDispatcher(snapshot.robots, example_config.waypoint_dispatch)
+    point = snapshot.robots['robot_2'].position
+    dispatcher.update_pending({'robot_2': point}, target_epoch=7)
+    first = dispatcher.tick(snapshot, 1.0, True)[0]
+    dispatcher.acknowledge(
+        'robot_2', snapshot.frame_id, first.token, point, 1.1,
+        snapshot.frame_id, measured_position=point,
+    )
+    dispatcher.update_pending({'robot_2': point}, target_epoch=7)
+    assert dispatcher.tick(snapshot, 1.2, True) == []
+    assert dispatcher.states['robot_2'].suppression_reason == (
+        'completed_destination_hold_continuation'
+    )
+
+    drifted = replace(
+        snapshot,
+        robots={
+            **snapshot.robots,
+            'robot_2': replace(snapshot.robots['robot_2'], x=point[0] + 0.31),
+        },
+    )
+    dispatcher.update_pending({'robot_2': point}, target_epoch=7)
+    assert dispatcher.tick(drifted, 1.3, True)[0].token != first.token
+
+
+def test_waypoint_failed_requires_exact_token_frame_and_coordinates(
+    example_config, snapshot
+):
+    dispatcher = WaypointDispatcher(snapshot.robots, example_config.waypoint_dispatch)
+    dispatcher.update_pending({'robot_2': (1.0, 1.0)}, target_epoch=2)
+    action = dispatcher.tick(snapshot, 1.0, True)[0]
+    assert not dispatcher.fail(
+        'robot_2', snapshot.frame_id, (99, 1), action.point, 1.1,
+        snapshot.frame_id,
+    )
+    assert dispatcher.fail(
+        'robot_2', snapshot.frame_id, action.token, action.point, 1.2,
+        snapshot.frame_id,
+    )
+    dispatcher.update_pending({'robot_2': action.point}, target_epoch=2)
+    assert dispatcher.tick(snapshot, 1.3, True) == []
+    assert dispatcher.states['robot_2'].failure_count == 1

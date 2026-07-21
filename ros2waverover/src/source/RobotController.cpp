@@ -4,6 +4,7 @@
 #include <json.hpp>
 #include <RoverCommands.hpp>
 #include <QDebug>
+#include <QDateTime>
 #include <QTimer>
 #include <algorithm>
 #include <chrono>
@@ -110,18 +111,30 @@ RobotController::RobotController() {
     );
     QObject::connect(
         this,
-        &RobotController::SendRequestSync,
+        &RobotController::SendVelocityRequest,
+        _pUARTSerialPort.get(),
+        &UARTSerialPort::enqueueVelocity,
+        Qt::QueuedConnection
+    );
+    QObject::connect(
         this,
-        [this](QString command) {
-            _pUARTSerialPort->sendRequestSync(command);
-        },
-        Qt::DirectConnection
+        &RobotController::SendOrderedRequest,
+        _pUARTSerialPort.get(),
+        &UARTSerialPort::enqueueOrdered,
+        Qt::QueuedConnection
     );
     QObject::connect(
         _pUARTSerialPort.get(),
         &UARTSerialPort::LineReceived,
         this,
         &RobotController::SerialLineReceived
+    );
+    QObject::connect(
+        _pUARTSerialPort.get(),
+        &UARTSerialPort::Reopened,
+        this,
+        &RobotController::ConfigureImuStream,
+        Qt::QueuedConnection
     );
 
     _serialReadTimer = new QTimer(this);
@@ -130,6 +143,13 @@ RobotController::RobotController() {
         _pUARTSerialPort->readResponse();
     });
     _serialReadTimer->start();
+    _serialHealthTimer = new QTimer(this);
+    _serialHealthTimer->setInterval(1000);
+    QObject::connect(
+        _serialHealthTimer, &QTimer::timeout,
+        this, &RobotController::PublishSerialHealth
+    );
+    _serialHealthTimer->start();
 
     SetupControlSubscriptions();
 
@@ -154,7 +174,13 @@ RobotController::~RobotController() {
     }
     else
     {
-        SendEmergencyStop();
+        nlohmann::json stop = {};
+        stop["T"] = static_cast<int>(WAVE_ROVER_COMMAND_TYPE::EMERGENCY_STOP);
+        // Destruction occurs in the QSerialPort owner thread after the event
+        // loop stops, so a queued signal would never be flushed.
+        _pUARTSerialPort->enqueueOrdered(
+            QString::fromStdString(stop.dump())
+        );
     }
     rclcpp::shutdown();
     _executor->cancel();
@@ -283,7 +309,7 @@ void RobotController::SetupControlSubscriptions() {
     _pROS2Subscriber->SubscribeToTopic(
         QString::fromStdString(_cmdVelTopic),
         [&](const geometry_msgs::msg::Twist::SharedPtr msg) {
-            std::cout << "VEL // " << SendCmdVel(msg);
+            SendCmdVel(msg);
         }
     );
 }
@@ -310,6 +336,20 @@ void RobotController::ConfigureImuStream() {
 
 void RobotController::SerialLineReceived(QString line) {
     PublishImuFrame(line);
+}
+
+void RobotController::PublishSerialHealth() {
+    nlohmann::json status = {
+        {"successful_writes", _pUARTSerialPort->successfulWrites()},
+        {"failed_writes", _pUARTSerialPort->failedWrites()},
+        {"timeouts", _pUARTSerialPort->timeouts()},
+        {"reopen_attempts", _pUARTSerialPort->reopenAttempts()},
+        {"consecutive_failures", _pUARTSerialPort->consecutiveFailures()},
+        {"last_successful_write_unix_ms", _pUARTSerialPort->lastSuccessfulWriteMs()},
+        {"malformed_imu_frames", _malformedImuFrames},
+        {"last_valid_imu_frame_unix_ms", _lastValidImuFrameMs}
+    };
+    _pROS2Subscriber->PublishSerialHealth(status.dump());
 }
 
 void RobotController::PublishImuFrame(const QString& line) {
@@ -342,7 +382,12 @@ void RobotController::PublishImuFrame(const QString& line) {
         {
             if (!message_json.contains(field) || !message_json[field].is_number())
             {
-                qDebug() << "Skipping malformed IMU frame, missing field:" << field;
+                ++_malformedImuFrames;
+                RCLCPP_WARN_THROTTLE(
+                    _pROS2Subscriber->get_logger(),
+                    *_pROS2Subscriber->get_clock(), 5000,
+                    "Skipping malformed IMU frames; count=%llu.",
+                    static_cast<unsigned long long>(_malformedImuFrames));
                 return;
             }
         }
@@ -368,12 +413,19 @@ void RobotController::PublishImuFrame(const QString& line) {
             !ExtractNumberField(text, "gy", gy) ||
             !ExtractNumberField(text, "gz", gz))
         {
-            qDebug() << "Skipping malformed IMU frame:" << error.what();
+            ++_malformedImuFrames;
+            RCLCPP_WARN_THROTTLE(
+                _pROS2Subscriber->get_logger(),
+                *_pROS2Subscriber->get_clock(), 5000,
+                "Skipping malformed IMU frames; count=%llu (%s).",
+                static_cast<unsigned long long>(_malformedImuFrames),
+                error.what());
             return;
         }
     }
 
     _pROS2Subscriber->PublishImu(ax, ay, az, gx, gy, gz);
+    _lastValidImuFrameMs = QDateTime::currentMSecsSinceEpoch();
 }
 
 bool RobotController::SendCmdVel(geometry_msgs::msg::Twist::SharedPtr msg){
@@ -566,8 +618,7 @@ bool RobotController::SendLeftRightVelocityCommand(double left, double right) {
         WHEEL_COMMAND_LIMIT
     );
 
-    qDebug() << "Sending velocity message " << QString::fromStdString(message_json.dump());
-    emit SendRequestSync(QString::fromStdString(message_json.dump()));
+    emit SendVelocityRequest(QString::fromStdString(message_json.dump()));
 
     return true;
 }
@@ -575,7 +626,7 @@ bool RobotController::SendLeftRightVelocityCommand(double left, double right) {
 bool RobotController::SendGenericCmd(WAVE_ROVER_COMMAND_TYPE command) {
     nlohmann::json message_json = {};
     message_json["T"] = static_cast<int>(command);
-    _pUARTSerialPort->sendRequestSync(QString::fromStdString(message_json.dump()));
+    emit SendOrderedRequest(QString::fromStdString(message_json.dump()));
     return true;
 }
 
@@ -583,7 +634,7 @@ bool RobotController::SendCommandWithValue(WAVE_ROVER_COMMAND_TYPE command, int 
     nlohmann::json message_json = {};
     message_json["T"] = static_cast<int>(command);
     message_json["cmd"] = value;
-    _pUARTSerialPort->sendRequestSync(QString::fromStdString(message_json.dump()));
+    emit SendOrderedRequest(QString::fromStdString(message_json.dump()));
     return true;
 }
 

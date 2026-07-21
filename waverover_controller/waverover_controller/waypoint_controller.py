@@ -1,5 +1,6 @@
 from collections import deque
 from dataclasses import dataclass
+import json
 import math
 import time
 
@@ -9,7 +10,7 @@ from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
-from std_msgs.msg import Empty
+from std_msgs.msg import Empty, String
 from tf2_ros import Buffer, TransformException, TransformListener
 from waverover.stack_config import (
     load_stack_config,
@@ -37,6 +38,8 @@ class ControllerConfig:
     cmd_vel_topic: str
     waypoint_topic: str
     waypoint_reached_topic: str
+    waypoint_failed_topic: str
+    navigation_status_topic: str
     end_trial_topic: str
     control_rate_hz: float
     goal_tolerance_m: float
@@ -50,6 +53,10 @@ class ControllerConfig:
     mcs_frame: str
     mcs_pose_timeout_sec: float
     mcs_qos_depth: int
+    progress_timeout_sec: float
+    minimum_progress_m: float
+    recovery_straight_duration_sec: float
+    maximum_recovery_attempts: int
 
     @classmethod
     def from_stack_defaults(cls, stack_config, robot_name):
@@ -64,6 +71,8 @@ class ControllerConfig:
             cmd_vel_topic=str(topics['cmd_vel']),
             waypoint_topic=str(topics['waypoints']),
             waypoint_reached_topic=str(topics['waypoint_reached']),
+            waypoint_failed_topic=str(topics['waypoint_failed']),
+            navigation_status_topic=str(topics['navigation_status']),
             end_trial_topic=str(topics['end_trial']),
             control_rate_hz=float(controller['control_rate_hz']),
             goal_tolerance_m=float(controller['goal_tolerance_m']),
@@ -81,6 +90,14 @@ class ControllerConfig:
             mcs_frame=str(mcs['frame']),
             mcs_pose_timeout_sec=float(mcs['pose_timeout_sec']),
             mcs_qos_depth=int(mcs['qos_depth']),
+            progress_timeout_sec=float(controller['progress_timeout_sec']),
+            minimum_progress_m=float(controller['minimum_progress_m']),
+            recovery_straight_duration_sec=float(
+                controller['recovery_straight_duration_sec']
+            ),
+            maximum_recovery_attempts=int(
+                controller['maximum_recovery_attempts']
+            ),
         )
 
 
@@ -89,6 +106,50 @@ class Pose2D:
     x: float
     y: float
     yaw: float
+
+
+@dataclass
+class WaypointProgress:
+    """Token-specific progress state for bounded straight recovery."""
+
+    token: tuple
+    initial_distance: float
+    best_distance: float
+    last_improvement_at: float
+    recovery_state: str = 'normal'
+    recovery_started_at: float = None
+    recovery_attempts: int = 0
+    improvement_reference_distance: float = None
+
+    def __post_init__(self):
+        if self.improvement_reference_distance is None:
+            self.improvement_reference_distance = self.initial_distance
+
+    def update(self, distance, now, timeout, minimum_progress,
+               escape_duration, maximum_attempts):
+        if self.improvement_reference_distance - distance >= minimum_progress:
+            self.best_distance = distance
+            self.improvement_reference_distance = distance
+            self.last_improvement_at = now
+            self.recovery_state = 'normal'
+            self.recovery_started_at = None
+            return 'improved'
+        self.best_distance = min(self.best_distance, distance)
+        if self.recovery_state == 'straight_escape':
+            if now - self.recovery_started_at < escape_duration:
+                return 'straight_escape'
+            self.recovery_state = 'normal'
+            self.recovery_started_at = None
+            return 'resume_navigation'
+        if now - self.last_improvement_at < timeout:
+            return 'normal'
+        if self.recovery_attempts >= maximum_attempts:
+            self.recovery_state = 'failed'
+            return 'failed'
+        self.recovery_attempts += 1
+        self.recovery_state = 'straight_escape'
+        self.recovery_started_at = now
+        return 'start_recovery'
 
 
 class PoseUnavailableError(RuntimeError):
@@ -313,6 +374,12 @@ class WaypointController(Node):
         self.waypoint_reached_topic = str(self.declare_parameter(
             'waypoint_reached_topic', config.waypoint_reached_topic
         ).value)
+        self.waypoint_failed_topic = str(self.declare_parameter(
+            'waypoint_failed_topic', config.waypoint_failed_topic
+        ).value)
+        self.navigation_status_topic = str(self.declare_parameter(
+            'navigation_status_topic', config.navigation_status_topic
+        ).value)
         self.end_trial_topic = str(self.declare_parameter(
             'end_trial_topic',
             config.end_trial_topic
@@ -365,6 +432,10 @@ class WaypointController(Node):
         ).value))
         self.waypoint_qos_depth = max(1, int(self.declare_parameter(
             'waypoint_qos_depth',
+            'progress_timeout_sec',
+            'minimum_progress_m',
+            'recovery_straight_duration_sec',
+            'maximum_recovery_attempts',
             config.waypoint_qos_depth,
         ).value))
         self.mcs_pose_topic = str(self.declare_parameter(
@@ -379,6 +450,26 @@ class WaypointController(Node):
             'mcs_qos_depth',
             config.mcs_qos_depth,
         ).value)
+        self.progress_timeout_sec = float(self.declare_parameter(
+            'progress_timeout_sec', config.progress_timeout_sec
+        ).value)
+        self.minimum_progress_m = float(self.declare_parameter(
+            'minimum_progress_m', config.minimum_progress_m
+        ).value)
+        self.recovery_straight_duration_sec = float(self.declare_parameter(
+            'recovery_straight_duration_sec',
+            config.recovery_straight_duration_sec,
+        ).value)
+        self.maximum_recovery_attempts = int(self.declare_parameter(
+            'maximum_recovery_attempts', config.maximum_recovery_attempts
+        ).value)
+        if (
+            self.progress_timeout_sec <= 0.0 or
+            self.minimum_progress_m <= 0.0 or
+            self.recovery_straight_duration_sec <= 0.0 or
+            self.maximum_recovery_attempts < 1
+        ):
+            raise ValueError('Waypoint progress/recovery settings are invalid.')
         if self.pose_source == 'MCS':
             if not self.mcs_pose_topic.startswith('/'):
                 raise ValueError(
@@ -413,6 +504,14 @@ class WaypointController(Node):
                 depth=self.waypoint_qos_depth,
                 reliability=ReliabilityPolicy.RELIABLE,
             ),
+        )
+        self.waypoint_failed_publisher = self.create_publisher(
+            PointStamped,
+            self.waypoint_failed_topic,
+            waypoint_qos,
+        )
+        self.navigation_status_publisher = self.create_publisher(
+            String, self.navigation_status_topic, 10
         )
         self.end_trial_subscription = self.create_subscription(
             Empty,
@@ -452,6 +551,7 @@ class WaypointController(Node):
         self.trial_ended = False
         self._pose_failure_active = False
         self._last_throttled_log = {}
+        self._waypoint_progress = None
 
         self.get_logger().info(
             'control_mode=%s pose_source=%s. Waiting for PointStamped '
@@ -552,6 +652,19 @@ class WaypointController(Node):
         config.waypoint_qos_depth = int(
             params.get('waypoint_qos_depth', config.waypoint_qos_depth)
         )
+        config.progress_timeout_sec = float(params.get(
+            'progress_timeout_sec', config.progress_timeout_sec
+        ))
+        config.minimum_progress_m = float(params.get(
+            'minimum_progress_m', config.minimum_progress_m
+        ))
+        config.recovery_straight_duration_sec = float(params.get(
+            'recovery_straight_duration_sec',
+            config.recovery_straight_duration_sec,
+        ))
+        config.maximum_recovery_attempts = int(params.get(
+            'maximum_recovery_attempts', config.maximum_recovery_attempts
+        ))
         return config
 
     def _extract_ros_parameters(self, yaml_data):
@@ -684,6 +797,7 @@ class WaypointController(Node):
         self.loiter_direction = None
         self.last_bank_direction = None
         self._pose_failure_active = False
+        self._waypoint_progress = None
         self.trial_ended = True
         command_name = self.publish_safe_stop()
         self.get_logger().info(
@@ -695,6 +809,7 @@ class WaypointController(Node):
     def _control_step(self):
         if self.trial_ended:
             command_name = self.publish_safe_stop()
+            WaypointController._publish_navigation_state(self, 'trial_ended')
             self._info_throttled(
                 'trial_ended',
                 'control_mode=%s queue_length=0 state=trial_ended command=%s'
@@ -721,9 +836,17 @@ class WaypointController(Node):
         target_heading = math.atan2(dy, dx)
         heading_error = normalize_angle(target_heading - current_yaw)
 
+        active_token = self.waypoint_tokens[0][1]
+        now = time.monotonic()
+        progress = getattr(self, '_waypoint_progress', None)
+        if progress is None or progress.token != active_token:
+            progress = WaypointProgress(active_token, distance, distance, now)
+            self._waypoint_progress = progress
+
         if distance < self.goal_tolerance_m:
             reached_x, reached_y = self.waypoint_queue.popleft()
             reached_frame, reached_token = self.waypoint_tokens.popleft()
+            self._waypoint_progress = None
             acknowledgement = PointStamped()
             acknowledgement.header.frame_id = reached_frame
             acknowledgement.header.stamp.sec = reached_token[0]
@@ -772,6 +895,54 @@ class WaypointController(Node):
                 )
             return
 
+        progress_action = progress.update(
+            distance,
+            now,
+            self.progress_timeout_sec,
+            self.minimum_progress_m,
+            self.recovery_straight_duration_sec,
+            self.maximum_recovery_attempts,
+        )
+        if progress_action in ('start_recovery', 'straight_escape'):
+            self.publish_forward()
+            if progress_action == 'start_recovery':
+                self.get_logger().warn(
+                    'Waypoint token %d.%09d recovery attempt %d/%d; '
+                    'distance=%.3f m best=%.3f m command=straight.' % (
+                        active_token[0], active_token[1],
+                        progress.recovery_attempts,
+                        self.maximum_recovery_attempts,
+                        distance, progress.best_distance,
+                    )
+                )
+            WaypointController._publish_navigation_status(
+                self, 'recovering', progress, distance
+            )
+            return
+        if progress_action == 'failed':
+            failed_x, failed_y = self.waypoint_queue.popleft()
+            failed_frame, failed_token = self.waypoint_tokens.popleft()
+            failure = PointStamped()
+            failure.header.frame_id = failed_frame
+            failure.header.stamp.sec, failure.header.stamp.nanosec = failed_token
+            failure.point.x, failure.point.y = failed_x, failed_y
+            publisher = getattr(self, 'waypoint_failed_publisher', None)
+            if publisher is not None:
+                publisher.publish(failure)
+            self.publish_safe_stop()
+            self.get_logger().error(
+                'Waypoint token %d.%09d navigation_stalled after %d '
+                'bounded recovery attempts; command cleared.' % (
+                    failed_token[0], failed_token[1],
+                    progress.recovery_attempts,
+                )
+            )
+            WaypointController._publish_navigation_status(
+                self, 'navigation_stalled', progress, distance
+            )
+            self._waypoint_progress = None
+            return
+
         if self.control_mode == 'fixed_wing':
             if heading_error > self.heading_tolerance_rad:
                 command_name = 'bank_left'
@@ -809,10 +980,42 @@ class WaypointController(Node):
             ),
             period_sec=1.0
         )
+        WaypointController._publish_navigation_status(
+            self, 'navigating', progress, distance
+        )
+
+    def _publish_navigation_state(self, state):
+        publisher = getattr(self, 'navigation_status_publisher', None)
+        if publisher is None:
+            return
+        message = String()
+        message.data = json.dumps(
+            {'state': state}, sort_keys=True, separators=(',', ':')
+        )
+        publisher.publish(message)
+
+    def _publish_navigation_status(self, state, progress, distance):
+        publisher = getattr(self, 'navigation_status_publisher', None)
+        if publisher is None:
+            return
+        message = String()
+        message.data = json.dumps({
+            'state': state,
+            'token': list(progress.token),
+            'initial_distance_m': progress.initial_distance,
+            'best_distance_m': progress.best_distance,
+            'distance_m': distance,
+            'recovery_state': progress.recovery_state,
+            'recovery_attempts': progress.recovery_attempts,
+        }, sort_keys=True, separators=(',', ':'))
+        publisher.publish(message)
 
     def _control_empty_queue(self):
         if not self.received_any_waypoint:
             command_name = self.publish_safe_stop()
+            WaypointController._publish_navigation_state(
+                self, 'waiting_first_waypoint'
+            )
             self._info_throttled(
                 'waiting_first_waypoint',
                 'control_mode=%s queue_length=0 state=waiting_first_waypoint '
@@ -824,6 +1027,7 @@ class WaypointController(Node):
 
         if self.control_mode == 'twist':
             self.publish_stop()
+            WaypointController._publish_navigation_state(self, 'waiting')
             self._info_throttled(
                 'waiting_for_more_waypoints',
                 'control_mode=twist queue_length=0 state=waiting command=stop',
@@ -839,6 +1043,7 @@ class WaypointController(Node):
             command_name = self._enter_loiter()
         else:
             command_name = self.publish_final_loiter()
+        WaypointController._publish_navigation_state(self, 'final_loiter')
 
         self._info_throttled(
             'final_loiter',

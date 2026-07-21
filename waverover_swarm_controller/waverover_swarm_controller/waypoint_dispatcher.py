@@ -1,6 +1,7 @@
 """Event-triggered dispatcher that respects the onboard FIFO."""
 
 from dataclasses import dataclass
+import math
 
 
 def token_value(token):
@@ -32,9 +33,17 @@ class RoverDispatchState:
     last_acknowledged_token: tuple = None
     last_acknowledged_waypoint: tuple = None
     last_acknowledged_at: float = None
+    last_acknowledged_target_epoch: int = 0
     acknowledgement_count: int = 0
     unmatched_acknowledgement_count: int = 0
     handoff_cause: str = 'none'
+    suppression_reason: str = ''
+    suppression_count: int = 0
+    last_failed_token: tuple = None
+    last_failed_waypoint: tuple = None
+    last_failed_target_epoch: int = 0
+    failure_count: int = 0
+    unmatched_failure_count: int = 0
 
 
 class WaypointDispatcher:
@@ -87,13 +96,49 @@ class WaypointDispatcher:
         state.last_published_at = now
         state.refresh_count = 0
         state.handoff_cause = 'initial' if not state.ever_commanded else 'acknowledgement'
+        state.suppression_reason = ''
         state.ever_commanded = True
         return DispatchAction(
             'waypoint', robot_id, point=point, token=state.active_token,
             target_epoch=state.active_target_epoch,
         )
 
-    def acknowledge(self, robot_id, frame_id, token, point, now, expected_frame):
+    def _suppress_repeated(self, state, measured_position):
+        point = state.pending_waypoint
+        epoch = state.pending_target_epoch
+        epsilon = self.config.repeated_destination_epsilon_m
+        if (
+            state.last_failed_waypoint is not None and
+            epoch == state.last_failed_target_epoch and
+            math.dist(point, state.last_failed_waypoint) <= epsilon
+        ):
+            return 'same_destination_as_failed_token'
+        if (
+            state.last_acknowledged_waypoint is None or
+            epoch != state.last_acknowledged_target_epoch or
+            math.dist(point, state.last_acknowledged_waypoint) > epsilon
+        ):
+            return ''
+        if measured_position is None:
+            return 'completed_destination_position_unknown'
+        if math.dist(measured_position, state.last_acknowledged_waypoint) <= (
+            self.config.completed_destination_reissue_distance_m
+        ):
+            return 'completed_destination_hold_continuation'
+        return ''
+
+    def _drop_suppressed_pending(self, state, measured_position):
+        reason = self._suppress_repeated(state, measured_position)
+        if not reason:
+            return False
+        state.pending_waypoint = None
+        state.suppression_reason = reason
+        state.suppression_count += 1
+        state.handoff_cause = 'suppressed'
+        return True
+
+    def acknowledge(self, robot_id, frame_id, token, point, now, expected_frame,
+                    measured_position=None):
         state = self.states.get(str(robot_id))
         try:
             point = (float(point[0]), float(point[1]))
@@ -113,6 +158,7 @@ class WaypointDispatcher:
         state.last_acknowledged_token = state.active_token
         state.last_acknowledged_waypoint = state.active_waypoint
         state.last_acknowledged_at = float(now)
+        state.last_acknowledged_target_epoch = state.active_target_epoch
         state.acknowledgement_count += 1
         state.active_waypoint = None
         state.active_token = None
@@ -122,7 +168,41 @@ class WaypointDispatcher:
         state.handoff_cause = 'acknowledgement'
         if state.pending_waypoint is None:
             return []
+        if self._drop_suppressed_pending(state, measured_position):
+            return []
         return [self._publish_pending(str(robot_id), state, now)]
+
+    def fail(self, robot_id, frame_id, token, point, now, expected_frame):
+        """Exact-match an onboard navigation_stalled notification."""
+        state = self.states.get(str(robot_id))
+        try:
+            point = (float(point[0]), float(point[1]))
+        except (TypeError, ValueError, IndexError):
+            point = (float('nan'), float('nan'))
+        valid = (
+            state is not None and frame_id == expected_frame and
+            token is not None and tuple(token) == state.active_token and
+            all(math.isfinite(value) for value in point) and
+            state.active_waypoint is not None and
+            all(abs(a - b) <= 1e-6 for a, b in zip(point, state.active_waypoint))
+        )
+        if not valid:
+            if state is not None:
+                state.unmatched_failure_count += 1
+            return False
+        state.last_failed_token = state.active_token
+        state.last_failed_waypoint = state.active_waypoint
+        state.last_failed_target_epoch = state.active_target_epoch
+        state.failure_count += 1
+        state.active_waypoint = None
+        state.active_token = None
+        state.active_published_at = None
+        state.last_published_at = None
+        state.refresh_count = 0
+        state.handoff_cause = 'navigation_stalled'
+        if state.pending_waypoint is not None:
+            self._drop_suppressed_pending(state, None)
+        return True
 
     def tick(self, snapshot, now, commands_enabled):
         if self.faulted or not commands_enabled:
@@ -132,6 +212,10 @@ class WaypointDispatcher:
             state = self.states[robot_id]
             if state.active_waypoint is None:
                 if state.pending_waypoint is not None:
+                    robot = snapshot.robots.get(robot_id) if snapshot else None
+                    position = None if robot is None else robot.position
+                    if self._drop_suppressed_pending(state, position):
+                        continue
                     actions.append(self._publish_pending(robot_id, state, now))
                 continue
             if now - state.last_published_at >= self.config.refresh_period_sec:
@@ -162,6 +246,7 @@ class WaypointDispatcher:
                     state.last_acknowledged_token
                 ),
                 'last_acknowledged_waypoint': state.last_acknowledged_waypoint,
+                'last_acknowledged_target_epoch': state.last_acknowledged_target_epoch,
                 'acknowledgement_count': state.acknowledgement_count,
                 'last_acknowledgement_monotonic_sec': state.last_acknowledged_at,
                 'last_acknowledgement_age_sec': (
@@ -170,6 +255,12 @@ class WaypointDispatcher:
                 ),
                 'unmatched_acknowledgement_count': state.unmatched_acknowledgement_count,
                 'handoff_cause': state.handoff_cause,
+                'suppression_reason': state.suppression_reason,
+                'suppression_count': state.suppression_count,
+                'last_failed_token': token_value(state.last_failed_token),
+                'last_failed_waypoint': state.last_failed_waypoint,
+                'failure_count': state.failure_count,
+                'unmatched_failure_count': state.unmatched_failure_count,
                 'active_target_epoch': state.active_target_epoch,
                 'pending_target_epoch': state.pending_target_epoch,
                 'active_waypoint_age_sec': active_age,

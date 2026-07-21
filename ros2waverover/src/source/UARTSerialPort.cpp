@@ -2,8 +2,12 @@
 #include <iostream>
 #include <QSerialPortInfo>
 #include <QDebug>
+#include <QCoreApplication>
+#include <QTimer>
+#include <QThread>
 
-UARTSerialPort::UARTSerialPort(QString path, int baudrate) {
+UARTSerialPort::UARTSerialPort(QString path, int baudrate)
+    : _path(path), _baudrate(baudrate) {
     const auto infos = QSerialPortInfo::availablePorts();
     std::cout << "Detected Serial port:";
     for (const QSerialPortInfo &info : infos)
@@ -15,6 +19,7 @@ UARTSerialPort::UARTSerialPort(QString path, int baudrate) {
             path = "/dev/" + info.portName();
         }
     }
+    _path = path;
 
     std::cout << (infos.size() ? "----" : " None.") << std::endl;
     qDebug() << "Opening " << path << " at baudrate " << baudrate << "...";
@@ -46,36 +51,86 @@ UARTSerialPort::~UARTSerialPort() {
     _serial.close();
 }
 
-void UARTSerialPort::sendRequestSync(QString text)
+void UARTSerialPort::enqueueVelocity(QString text)
 {
-    std::lock_guard<std::mutex> lock(_serial_mutex);
-    if(!isAvailable())
+    Q_ASSERT(QThread::currentThread() == thread());
+    _latestVelocity = text;
+    if (_velocityFlushScheduled)
     {
-        qDebug() << "Serial Port is down!";
         return;
     }
-    QByteArray payload = (text + "\n").toUtf8();
+    _velocityFlushScheduled = true;
+    QTimer::singleShot(0, this, &UARTSerialPort::flushLatestVelocity);
+}
+
+void UARTSerialPort::flushLatestVelocity()
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    const QString newest = _latestVelocity;
+    _latestVelocity.clear();
+    _velocityFlushScheduled = false;
+    writeNow(newest);
+    if (!_latestVelocity.isEmpty() && !_velocityFlushScheduled)
+    {
+        _velocityFlushScheduled = true;
+        QTimer::singleShot(0, this, &UARTSerialPort::flushLatestVelocity);
+    }
+}
+
+void UARTSerialPort::enqueueOrdered(QString text)
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    writeNow(text);
+}
+
+bool UARTSerialPort::writeNow(const QString& text)
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    if(!isAvailable())
+    {
+        ++_failedWrites;
+        ++_consecutiveFailures;
+        if (_consecutiveFailures >= _maximumReopenAttempts)
+        {
+            qCritical() << "Serial reopen recovery exhausted; terminating bridge.";
+            QCoreApplication::exit(2);
+        }
+        return false;
+    }
+    const QByteArray payload = (text + "\n").toUtf8();
     qint64 bytesWritten = _serial.write(payload);
     if (bytesWritten < 0)
     {
+        ++_failedWrites;
+        ++_consecutiveFailures;
         qDebug() << "UART write failed:" << _serial.errorString();
-        return;
+        return false;
     }
 
     if (!_serial.waitForBytesWritten(_writeTimeout))
     {
+        ++_failedWrites;
+        ++_timeouts;
+        ++_consecutiveFailures;
         qDebug() << "UART write timeout:" << _serial.errorString();
-        return;
+        _serial.close();
+        if (_consecutiveFailures >= _maximumReopenAttempts && !reopen())
+        {
+            qCritical() << "Serial recovery exhausted; terminating bridge.";
+            QCoreApplication::exit(2);
+        }
+        return false;
     }
+    ++_successfulWrites;
+    _consecutiveFailures = 0;
+    _lastSuccessfulWriteMs = QDateTime::currentMSecsSinceEpoch();
+    return true;
 }
 
 bool UARTSerialPort::readResponse()
 {
-    QByteArray data;
-    {
-        std::lock_guard<std::mutex> lock(_serial_mutex);
-        data = _serial.readAll();
-    }
+    Q_ASSERT(QThread::currentThread() == thread());
+    QByteArray data = _serial.readAll();
 
     if (data.isEmpty())
     {
@@ -105,12 +160,26 @@ bool UARTSerialPort::isAvailable()
 {
     if(_serial.isOpen())
         return true;
+    return reopen();
+}
 
-    else
+bool UARTSerialPort::reopen()
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    for (int attempt = 0; attempt < _maximumReopenAttempts; ++attempt)
     {
-        qDebug() << "Trying to recover the Serial Port...";
+        ++_reopenAttempts;
         _serial.close();
-        return _serial.open(QIODevice::ReadWrite);
+        _serial.setPortName(_path);
+        _serial.setBaudRate(_baudrate);
+        if (_serial.open(QIODevice::ReadWrite))
+        {
+            _serial.setRequestToSend(true);
+            _serial.setDataTerminalReady(true);
+            _consecutiveFailures = 0;
+            emit Reopened();
+            return true;
+        }
     }
     return false;
 }

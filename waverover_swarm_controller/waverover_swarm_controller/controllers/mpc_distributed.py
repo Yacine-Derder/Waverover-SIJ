@@ -5,18 +5,18 @@ import time
 
 import numpy as np
 
-from ..models import ControllerResult
 from .base import (
     ControllerUnavailableError,
-    SwarmController,
     minimum_lookahead,
     optional_dependency,
     replace_first_future_points,
+    SwarmController,
 )
 from .collision_avoidance import (
-    distributed_closing_limits,
-    points_satisfy_distributed_limits,
+    SEPARATION_SLACK_PENALTY,
+    stable_separation_normal,
 )
+from ..models import ControllerResult
 
 
 def select_fiedler_edges(snapshot, maximum_range):
@@ -126,6 +126,14 @@ class DistributedMpcController(SwarmController):
         maximum_link = self.config.communication.maximum_range_m - (
             2.0 * self.config.vehicle.turn_radius_m
         )
+        separation_neighbors = tuple(
+            key for key in sorted(snapshot.robots) if key != robot_id
+        )
+        separation_slack = cp.Variable(
+            (horizon, len(separation_neighbors)), nonneg=True
+        ) if separation_neighbors else None
+        if separation_slack is not None:
+            objective += SEPARATION_SLACK_PENALTY * cp.sum(separation_slack)
         for step in range(1, horizon + 1):
             constraints.append(
                 cp.norm(path[step] - path[step - 1])
@@ -140,6 +148,28 @@ class DistributedMpcController(SwarmController):
                     normal[0] * displacement[0]
                     + normal[1] * displacement[1]
                     >= -closing_budget
+                )
+            for neighbor_index, neighbor_id in enumerate(separation_neighbors):
+                neighbor_path = neighbor_predictions.get(neighbor_id)
+                neighbor_position = (
+                    snapshot.robots[neighbor_id].position
+                    if neighbor_path is None else
+                    neighbor_path[min(step, len(neighbor_path) - 1)]
+                )
+                normal = stable_separation_normal(
+                    robot_id,
+                    neighbor_id,
+                    {
+                        robot_id: robot.position,
+                        neighbor_id: snapshot.robots[neighbor_id].position,
+                    },
+                    snapshot.target_epoch,
+                )
+                difference = path[step] - np.asarray(neighbor_position)
+                constraints.append(
+                    normal[0] * difference[0] + normal[1] * difference[1]
+                    + separation_slack[step - 1, neighbor_index]
+                    >= self.config.safety.preferred_separation_m
                 )
             for neighbor_id in connected_neighbors:
                 if neighbor_id == snapshot.station.station_id:
@@ -215,14 +245,8 @@ class DistributedMpcController(SwarmController):
         edges = select_fiedler_edges(
             snapshot, self.config.communication.maximum_range_m
         )
-        current_positions = {
-            robot_id: snapshot.robots[robot_id].position
-            for robot_id in robot_ids
-        }
-        closing_limits = distributed_closing_limits(
-            current_positions,
-            self.config.safety.minimum_separation_m,
-        )
+        # Preferred separation is soft and repaired controller-independently.
+        closing_limits = {robot_id: () for robot_id in robot_ids}
         cycle_predictions = {
             robot_id: self._prediction_at_current(
                 self._previous_predictions.get(robot_id),
@@ -276,15 +300,7 @@ class DistributedMpcController(SwarmController):
             )
             for robot_id in robot_ids
         }
-        setpoints = (
-            lookahead_setpoints
-            if points_satisfy_distributed_limits(
-                current_positions,
-                lookahead_setpoints,
-                closing_limits,
-            )
-            else {robot_id: solved[robot_id][1] for robot_id in robot_ids}
-        )
+        setpoints = lookahead_setpoints
         predicted_paths = replace_first_future_points(solved, setpoints)
         self._previous_predictions = predicted_paths
         return ControllerResult(

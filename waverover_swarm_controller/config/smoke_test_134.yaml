@@ -17,7 +17,7 @@ targets_file: targets.yaml
 
 target_dynamics:
   mode: random_priority
-  switch_period_sec: 10.0
+  switch_period_sec: 20.0
   priority_weight: 10.0
   background_weight: 1.0
   seed: 2026

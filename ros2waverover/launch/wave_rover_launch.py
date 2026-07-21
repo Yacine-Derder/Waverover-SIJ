@@ -1,5 +1,9 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import (
+    DeclareLaunchArgument, EmitEvent, OpaqueFunction, RegisterEventHandler,
+)
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -28,7 +32,7 @@ def _launch_bridge(context):
     robot_ns = robot_namespace(STACK_DEFAULTS, robot_name)
     topics = required(STACK_DEFAULTS, 'topics')
 
-    return [Node(
+    bridge_node = Node(
         package='ros2waverover',
         namespace=robot_ns,
         executable='ros2waverover-node',
@@ -51,6 +55,7 @@ def _launch_bridge(context):
             'control_mode': control_mode,
             'cmd_vel_topic': topics['cmd_vel'],
             'imu_topic': topics['imu'],
+            'serial_health_topic': topics['serial_health'],
             'imu_frame_id': robot_frame(
                 STACK_DEFAULTS,
                 'base',
@@ -62,7 +67,16 @@ def _launch_bridge(context):
                 value_type=float,
             ),
         }],
-    )]
+    )
+    return [
+        bridge_node,
+        RegisterEventHandler(OnProcessExit(
+            target_action=bridge_node,
+            on_exit=[EmitEvent(event=Shutdown(
+                reason='critical serial bridge exited'
+            ))],
+        )),
+    ]
 
 
 def generate_launch_description():

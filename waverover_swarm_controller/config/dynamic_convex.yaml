@@ -1,7 +1,7 @@
 # PC-only reproducible random-motion recording test: centralized convex.
 frame_id: robotics_lab
 
-robot_ids: ["131", "132", "133", "134"]
+robot_ids: ["131", "132", "133", "134", "135", "136"]
 
 pose:
   timeout_sec: 0.5
@@ -11,16 +11,7 @@ station:
   id: station_0
   position: [0.0, 0.0]
 
-targets_file: targets_smoke_6.yaml
-
-target_dynamics:
-  mode: random_priority
-  switch_period_sec: 10.0
-  priority_weight: 10.0
-  background_weight: 1.0
-  seed: 2026
-  initial_priority_target_id: null
-  avoid_immediate_repeat: true
+targets_file: targets_setup_1.yaml
 
 vehicle:
   straight_speed_mps: 0.333333
@@ -38,6 +29,8 @@ controller:
   distributed_update_semantics: jacobi
 
 waypoint_dispatch:
+  reached_distance_m: 0.05
+  handoff_delay_sec: 0.15
   refresh_period_sec: 1.0
   active_waypoint_warning_sec: 10.0
 

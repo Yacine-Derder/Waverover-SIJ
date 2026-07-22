@@ -43,6 +43,7 @@ controller:
   minimum_mpc_lookahead_m: 0.30
   deterministic_seed: 42
   distributed_update_semantics: jacobi
+  distributed_inter_agent_weight: 2.0
 
 waypoint_dispatch:
   refresh_period_sec: 1.0

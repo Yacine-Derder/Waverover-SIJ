@@ -230,9 +230,11 @@ class ReplayApp:
                 for second in node_ids[first_index + 1:]:
                     distance = math.dist(nodes[first], nodes[second])
                     if distance <= config.communication.maximum_range_m:
-                        quality = max(0.0, min(1.0,
+                        quality = max(0.0, min(
+                            1.0,
                             (config.communication.maximum_range_m - distance)
-                            / config.communication.maximum_range_m))
+                            / config.communication.maximum_range_m,
+                        ))
                         axis.plot(
                             [nodes[first][0], nodes[second][0]],
                             [nodes[first][1], nodes[second][1]],
@@ -268,10 +270,11 @@ class ReplayApp:
                 )
         connectivity = telemetry.get('connectivity', {})
         axis.set_title(
-            '%s | solver=%s | state=%s | stop=%s\n'
+            '%s | mode=%s | solver=%s | state=%s | stop=%s\n'
             't=%.2f s remaining=%.2f s lambda_2=%s'
             % (
                 telemetry.get('algorithm', config.controller.algorithm),
+                telemetry.get('optimization_mode', ''),
                 telemetry.get('solver_status'),
                 telemetry.get('result_state'),
                 telemetry.get('stop_reason', ''),

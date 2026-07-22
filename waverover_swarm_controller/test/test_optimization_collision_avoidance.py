@@ -138,7 +138,7 @@ def test_soft_separation_slack_keeps_coincident_problem_feasible():
     current = {'131': (0.0, 0.0), '132': (0.0, 0.0)}
     positions = cp.Variable((2, 2, 2))
     constraints, penalty = centralized_soft_separation(
-        positions, robot_ids, current, 0.30, target_epoch=4
+        positions, robot_ids, current, 0.35, target_epoch=4
     )
     problem = cp.Problem(
         cp.Minimize(cp.sum_squares(positions[1:]) + penalty),

@@ -22,6 +22,8 @@ def _minimum_pairwise_separation(points_by_id):
 
 
 def validate_controller_result(config, snapshot, result, now):
+    from .waypoint_repair import _simultaneous_segment_distance
+
     collision_events = []
     if snapshot.frame_id != 'robotics_lab':
         raise SafetyViolation('Snapshot frame is not robotics_lab.')
@@ -66,6 +68,18 @@ def validate_controller_result(config, snapshot, result, now):
             'kind': 'proposed', 'pair': (proposed_first, proposed_second),
             'distance_m': proposed_distance,
         })
+    for first_id, second_id in combinations(sorted(snapshot.robots), 2):
+        segment_distance, fraction = _simultaneous_segment_distance(
+            snapshot.robots[first_id].position, result.setpoints[first_id],
+            snapshot.robots[second_id].position, result.setpoints[second_id],
+        )
+        if segment_distance < config.safety.minimum_separation_m:
+            collision_events.append({
+                'kind': 'predicted_first_segment',
+                'pair': (first_id, second_id),
+                'distance_m': segment_distance,
+                'segment_fraction': fraction,
+            })
 
     paths = result.predicted_paths
     if paths:

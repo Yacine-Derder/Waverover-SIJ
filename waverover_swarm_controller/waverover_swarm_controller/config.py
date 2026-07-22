@@ -48,6 +48,7 @@ class ControllerConfig:
     minimum_mpc_lookahead_m: float
     deterministic_seed: int
     distributed_update_semantics: str
+    distributed_inter_agent_weight: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -352,7 +353,7 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
     if collision_policy != 'best_effort':
         raise ConfigError('safety.collision_policy must be best_effort.')
     preferred_separation = safety_data.get(
-        'preferred_separation_m', safety_data.get('minimum_separation_m', 0.30)
+        'preferred_separation_m', safety_data.get('minimum_separation_m', 0.35)
     )
 
     synthetic_mode = str(synthetic_data.get('mode', 'static')).strip().lower()
@@ -591,6 +592,10 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
             ),
             deterministic_seed=controller_seed,
             distributed_update_semantics=semantics,
+            distributed_inter_agent_weight=_finite(
+                controller_data.get('distributed_inter_agent_weight', 2.0),
+                'controller.distributed_inter_agent_weight', nonnegative=True,
+            ),
         ),
         waypoint_dispatch=DispatchConfig(
             refresh_period_sec=_finite(

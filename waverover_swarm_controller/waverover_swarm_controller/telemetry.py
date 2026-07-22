@@ -10,7 +10,7 @@ from .metrics import (
 )
 
 
-CONTROLLER_TELEMETRY_SCHEMA_VERSION = 5
+CONTROLLER_TELEMETRY_SCHEMA_VERSION = 6
 
 
 def _point(point):
@@ -233,6 +233,12 @@ def build_controller_telemetry(
             if result is not None and result.target_assignments else None
         ),
         'solver_status': result.solver_status if result is not None else None,
+        'optimization_mode': (
+            result.optimization_mode if result is not None else ''
+        ),
+        'controller_diagnostics': (
+            dict(result.controller_diagnostics) if result is not None else {}
+        ),
         'collision_policy': config.safety.collision_policy,
         'preferred_separation_m': config.safety.preferred_separation_m,
         'waypoint_separation_repair': (

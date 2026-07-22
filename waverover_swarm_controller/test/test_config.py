@@ -23,6 +23,7 @@ def test_calibrated_defaults_and_pc_robot_ids():
     assert config.controller.mpc_horizon == 5
     assert config.controller.mpc_max_step_m == pytest.approx(0.333333)
     assert config.controller.minimum_mpc_lookahead_m == pytest.approx(0.30)
+    assert config.controller.distributed_inter_agent_weight == pytest.approx(2.0)
     assert config.waypoint_dispatch.refresh_period_sec == pytest.approx(1.0)
     assert config.waypoint_dispatch.active_waypoint_warning_sec == pytest.approx(
         10.0
@@ -35,6 +36,7 @@ def test_calibrated_defaults_and_pc_robot_ids():
     )
     assert config.target_dynamics.switch_period_sec == pytest.approx(20.0)
     assert config.safety.dry_run
+    assert config.safety.preferred_separation_m == pytest.approx(0.35)
     assert config.synthetic_mcs.mode == 'static'
     assert config.synthetic_mcs.formation_coupling == 'rigid'
     assert config.synthetic_mcs.connectivity_policy == 'enforce'
@@ -86,7 +88,7 @@ def test_absent_target_switch_period_defaults_to_twenty_seconds(tmp_path):
     ).target_dynamics.switch_period_sec == pytest.approx(20.0)
 
 
-def test_real_experiments_use_best_effort_thirty_centimeter_separation():
+def test_real_experiments_use_best_effort_thirty_five_centimeter_separation():
     config_dir = Path(__file__).parents[1] / 'config'
     real_paths = sorted(config_dir.glob('*_real.yaml'))
     assert real_paths
@@ -94,7 +96,7 @@ def test_real_experiments_use_best_effort_thirty_centimeter_separation():
         config = load_experiment(path)
         assert config.target_dynamics.switch_period_sec == pytest.approx(20.0)
         assert config.safety.collision_policy == 'best_effort'
-        assert config.safety.preferred_separation_m == pytest.approx(0.30)
+        assert config.safety.preferred_separation_m == pytest.approx(0.35)
 
 
 def test_legacy_active_timeout_is_accepted_as_nonfatal_warning_alias(tmp_path):

@@ -13,8 +13,8 @@ from rclpy.validate_topic_name import validate_topic_name
 from waverover.stack_config import load_stack_config
 import waverover_swarm_controller.coordinator_node as coordinator_module
 from waverover_swarm_controller.coordinator_node import (
-    SwarmCoordinator,
     predicted_path_topic,
+    SwarmCoordinator,
 )
 from waverover_swarm_controller.models import ControllerResult
 from waverover_swarm_controller.waypoint_dispatcher import WaypointDispatcher
@@ -85,6 +85,41 @@ def test_coordinator_has_no_arm_interface_or_state():
     assert 'std_srvs' not in source
     assert 'arm_service' not in source
     assert 'self.armed' not in source
+
+
+def test_convex_solver_failures_fall_back_without_faulting_dispatcher(
+    example_config, snapshot
+):
+    class FailingController:
+        def compute(self, _snapshot):
+            raise RuntimeError('Convex problem status is infeasible.')
+
+        def compute_recovery(self, _snapshot):
+            raise RuntimeError('recovery solver exception')
+
+    config = replace(
+        example_config,
+        controller=replace(example_config.controller, algorithm='convex'),
+    )
+    dispatcher = WaypointDispatcher(snapshot.robots, config.waypoint_dispatch)
+    coordinator = SimpleNamespace(
+        config=config,
+        controller=FailingController(),
+        dispatcher=dispatcher,
+        latest_collision_events=[],
+        latest_rejected_result=None,
+        latest_stop_reason='',
+        get_logger=lambda: SimpleNamespace(warn=lambda _message: None),
+    )
+
+    result = SwarmCoordinator._compute_valid_result(coordinator, snapshot)
+
+    assert result.optimization_mode == 'deterministic_recovery'
+    assert result.setpoints == {
+        key: state.position for key, state in snapshot.robots.items()
+    }
+    assert not dispatcher.faulted
+    assert coordinator._optimization_dispatch_allowed
 
 
 def test_dispatch_suppresses_dry_run_and_live_mode_publishes_immediately(

@@ -1,6 +1,6 @@
 """ROS boundary for the operator-PC swarm coordinator."""
 
-from dataclasses import asdict, replace
+from dataclasses import replace
 import json
 import signal
 import time
@@ -21,15 +21,15 @@ from .config import ConfigError, load_experiment
 from .controllers import controller_from_config
 from .controllers.base import (
     ControllerUnavailableError,
-    replace_first_future_points,
+    repair_controller_result,
 )
 from .metrics import algebraic_connectivity, minimum_pairwise_distance
+from .models import ControllerResult
 from .pose_aggregation import PoseAggregator, SnapshotUnavailableError
 from .safety import SafetyViolation, validate_controller_result
 from .target_dynamics import TargetManager
 from .telemetry import build_controller_telemetry, canonical_json
 from .waypoint_dispatcher import WaypointDispatcher
-from .waypoint_repair import repair_waypoints
 
 
 def predicted_path_topic(stack_config, robot_id):
@@ -219,19 +219,111 @@ class SwarmCoordinator(Node):
         )
 
     def _compute_valid_result(self, snapshot):
-        result = self.controller.compute(snapshot)
-        try:
-            collision_validation = validate_controller_result(
-                self.config, snapshot, result, time.monotonic()
+        optimization = self.config.controller.algorithm in (
+            'convex', 'mpc_centralized', 'mpc_distributed'
+        )
+        self._optimization_dispatch_allowed = True
+        attempts = [('normal', self.controller.compute)]
+        recovery = getattr(self.controller, 'compute_recovery', None)
+        if optimization and recovery is not None:
+            attempts.append(('recovery', recovery))
+        errors = []
+        for label, operation in attempts:
+            try:
+                result = operation(snapshot)
+                result = SwarmCoordinator._repair_result(self, snapshot, result)
+                collision_validation = validate_controller_result(
+                    self.config, snapshot, result, time.monotonic()
+                )
+                self.latest_collision_events = (
+                    [] if collision_validation is True else collision_validation
+                )
+                self.latest_rejected_result = None
+                return result
+            except Exception as error:  # solver/controller failures are recoverable
+                errors.append('%s: %s' % (label, error))
+                self.latest_rejected_result = locals().get('result')
+                if not optimization:
+                    raise
+        # Deterministic connectivity recovery moves each child toward a stable
+        # station-rooted nearest tree, without exceeding the physical step.
+        for mode in ('deterministic_recovery', 'safe_hold'):
+            points = {
+                robot_id: snapshot.robots[robot_id].position
+                for robot_id in sorted(snapshot.robots)
+            }
+            edges = ()
+            if mode == 'deterministic_recovery':
+                from .controllers.convex import _tree_edges
+                import math
+
+                edges = _tree_edges(snapshot)
+                maximum_link = (
+                    self.config.communication.maximum_range_m
+                    - self.config.vehicle.turn_radius_m
+                )
+                for parent, robot_id in edges:
+                    parent_point = (
+                        snapshot.station.position
+                        if parent == snapshot.station.station_id
+                        else points[parent]
+                    )
+                    current = snapshot.robots[robot_id].position
+                    distance = math.dist(current, parent_point)
+                    if distance > maximum_link and distance > 1e-12:
+                        travel = min(
+                            self.config.controller.mpc_max_step_m,
+                            distance - maximum_link,
+                        )
+                        points[robot_id] = (
+                            current[0] + travel
+                            * (parent_point[0] - current[0]) / distance,
+                            current[1] + travel
+                            * (parent_point[1] - current[1]) / distance,
+                        )
+            result = ControllerResult(
+                setpoints=points,
+                predicted_paths={
+                    key: (point, point) for key, point in points.items()
+                },
+                selected_edges=edges,
+                solver_status=mode,
+                diagnostic='; '.join(errors),
+                created_at=time.monotonic(),
+                target_epoch=snapshot.target_epoch,
+                optimization_mode=mode,
             )
-            self.latest_collision_events = (
-                [] if collision_validation is True else collision_validation
-            )
-        except SafetyViolation:
-            self.latest_rejected_result = result
-            raise
-        self.latest_rejected_result = None
-        return result
+            try:
+                if mode != 'safe_hold':
+                    result = SwarmCoordinator._repair_result(
+                        self, snapshot, result
+                    )
+                collision_validation = validate_controller_result(
+                    self.config, snapshot, result, time.monotonic()
+                )
+                if (
+                    mode == 'deterministic_recovery'
+                    and result.collision_repair.get(
+                        'maximum_link_violation_m', 0.0
+                    ) > 1e-6
+                ):
+                    raise SafetyViolation(
+                        'Deterministic recovery cannot restore every link '
+                        'within one physical step.'
+                    )
+                self.latest_collision_events = (
+                    [] if collision_validation is True else collision_validation
+                )
+                self.latest_rejected_result = None
+                return result
+            except Exception as error:
+                errors.append('%s: %s' % (mode, error))
+        # Keep the process and dispatcher healthy, but do not enqueue a hold
+        # which failed pre-dispatch validation.
+        self._optimization_dispatch_allowed = False
+        self.latest_stop_reason = '; '.join(errors)
+        self.latest_rejected_result = result
+        return replace(result, diagnostic=self.latest_stop_reason)
 
     def _repair_result(self, snapshot, result):
         active = {
@@ -241,33 +333,25 @@ class SwarmCoordinator(Node):
             ).items()
             if state.active_waypoint is not None
         }
-        repaired, report = repair_waypoints(
-            result.setpoints,
-            active,
-            self.config.safety.geofence,
-            self.config.safety.preferred_separation_m,
-            self.config.safety.collision_repair_max_iterations,
-            snapshot.target_epoch,
+        output = repair_controller_result(
+            self.config, snapshot, result, active=active
         )
-        paths = replace_first_future_points(result.predicted_paths, repaired)
-        metadata = asdict(report)
+        metadata = dict(output.collision_repair)
         metadata['controller_output_repair'] = dict(result.collision_repair)
         metadata['collision_events'] = tuple(getattr(
             self, 'latest_collision_events', ()
         ))
         metadata['predicted_paths_after_first_step'] = 'pre_repair'
-        if report.residual_violation_m > 1e-6:
+        if metadata['residual_violation_m'] > 1e-6:
             logger = self.get_logger() if hasattr(self, 'get_logger') else None
             if logger is not None:
                 logger.warn(
                     'Best-effort waypoint separation has %.3f m residual; '
                     'continuing with finite geofence-valid least-violating '
-                    'output.' % report.residual_violation_m
+                    'output.' % metadata['residual_violation_m']
                 )
         return replace(
-            result,
-            setpoints=repaired,
-            predicted_paths=paths,
+            output,
             collision_repair=metadata,
         )
 
@@ -283,8 +367,6 @@ class SwarmCoordinator(Node):
             return
         try:
             result = self._compute_valid_result(snapshot)
-            if hasattr(self, 'config'):
-                result = SwarmCoordinator._repair_result(self, snapshot, result)
         except (
             SafetyViolation,
             ControllerUnavailableError,
@@ -292,7 +374,10 @@ class SwarmCoordinator(Node):
             ValueError,
         ) as error:
             self.latest_stop_reason = str(error)
-            if self.dispatcher.commanded_robot_ids:
+            optimization = self.config.controller.algorithm in (
+                'convex', 'mpc_centralized', 'mpc_distributed'
+            )
+            if self.dispatcher.commanded_robot_ids and not optimization:
                 self._stop_trial('invalid controller cycle: %s' % error)
             rejected = self.latest_rejected_result
             self._publish_controller_telemetry(
@@ -304,7 +389,10 @@ class SwarmCoordinator(Node):
             return
         # Clear transient pre-dispatch warnings after a valid cycle. Once any
         # rover has been commanded, faults stay latched until process restart.
-        if not self.dispatcher.faulted:
+        if (
+            not self.dispatcher.faulted
+            and getattr(self, '_optimization_dispatch_allowed', True)
+        ):
             self.latest_stop_reason = ''
 
         self.latest_snapshot = snapshot
@@ -319,7 +407,15 @@ class SwarmCoordinator(Node):
             self._dispatch(snapshot)
         if hasattr(self, '_publish_target_state'):
             self._publish_target_state(snapshot)
-        self._publish_controller_telemetry(snapshot, result, 'valid')
+        self._publish_controller_telemetry(
+            snapshot,
+            result,
+            (
+                'valid'
+                if getattr(self, '_optimization_dispatch_allowed', True)
+                else 'non_dispatching_safe_hold'
+            ),
+        )
         self._publish_visualization(snapshot, result)
         self._publish_diagnostics()
 

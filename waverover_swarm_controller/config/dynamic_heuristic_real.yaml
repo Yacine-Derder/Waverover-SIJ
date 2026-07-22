@@ -36,6 +36,7 @@ controller:
   minimum_mpc_lookahead_m: 0.30
   deterministic_seed: 42
   distributed_update_semantics: jacobi
+  distributed_inter_agent_weight: 2.0
 
 waypoint_dispatch:
   maximum_active_time_sec: 10.0
@@ -47,7 +48,7 @@ communication:
 safety:
   dry_run: False
   collision_policy: best_effort
-  preferred_separation_m: 0.30
+  preferred_separation_m: 0.35
   collision_repair_max_iterations: 50
   controller_result_timeout_sec: 2.5
   geofence: {x_min: -4.0, x_max: 4.0, y_min: -4.0, y_max: 4.0}

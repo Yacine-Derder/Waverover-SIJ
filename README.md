@@ -665,8 +665,10 @@ An active token with less than 0.03 m progress for 3 seconds enters a bounded
 0.75 second straight escape. Three unsuccessful attempts produce an exact,
 token-preserving `waypoint_failed`, not a false reached acknowledgement.
 
-Real dispatch uses 0.30 m best-effort separation. Every algorithm shares one
-deterministic geofence-aware repair stage. Collision observations are recorded
+Real dispatch uses 0.35 m best-effort separation. Every algorithm shares one
+deterministic geofence-, step-, connectivity-, and segment-aware repair stage.
+This detects simultaneous first-step crossings but does not claim
+continuous-trajectory collision avoidance. Collision observations are recorded
 but cannot send `end_trial`; malformed, stale, non-finite, frame-invalid, and
 geofence-invalid data still fail closed. Target priority switches every 20
 seconds by default.

@@ -47,10 +47,12 @@ def minimum_lookahead(robot, point, minimum_distance, maximum_step):
     dx = float(point[0]) - robot.x
     dy = float(point[1]) - robot.y
     distance = math.hypot(dx, dy)
-    if not math.isfinite(distance) or distance <= 1e-12:
+    if not math.isfinite(distance):
         raise InvalidControllerResult(
-            'Cannot construct an MPC carrot from a zero/non-finite direction.'
+            'Cannot construct an MPC carrot from a non-finite direction.'
         )
+    if distance <= 1e-12:
+        return robot.position
     requested = min(max(distance, minimum_distance), maximum_step)
     scale = requested / distance
     return (robot.x + scale * dx, robot.y + scale * dy)
@@ -65,6 +67,61 @@ def replace_first_future_points(predicted_paths, setpoints):
             points[1] = tuple(float(value) for value in setpoints[robot_id])
         output[robot_id] = tuple(points)
     return output
+
+
+def repair_controller_result(config, snapshot, result, active=None):
+    """Apply one deterministic bounded post-processing policy."""
+    from ..waypoint_repair import repair_waypoints
+
+    algorithm = config.controller.algorithm
+    connectivity = {}
+    if algorithm in (
+        'heuristic', 'heuristic_decentralized', 'convex',
+        'mpc_centralized', 'mpc_distributed',
+    ):
+        station_id = snapshot.station.station_id
+        maximum_link = (
+            config.communication.maximum_range_m - config.vehicle.turn_radius_m
+        )
+        for first, second in sorted(result.selected_edges):
+            for robot_id, neighbor_id in ((first, second), (second, first)):
+                if robot_id not in snapshot.robots:
+                    continue
+                center = (
+                    snapshot.station.position if neighbor_id == station_id
+                    else snapshot.robots[neighbor_id].position
+                )
+                connectivity.setdefault(robot_id, []).append(
+                    (neighbor_id, center, maximum_link)
+                )
+    maximum_step = (
+        config.controller.mpc_max_step_m
+        if algorithm in ('convex', 'mpc_centralized', 'mpc_distributed')
+        else None
+    )
+    repaired, report = repair_waypoints(
+        result.setpoints,
+        active or {},
+        config.safety.geofence,
+        config.safety.preferred_separation_m,
+        config.safety.collision_repair_max_iterations,
+        snapshot.target_epoch,
+        current_positions={
+            key: state.position for key, state in snapshot.robots.items()
+        },
+        connectivity_constraints=connectivity,
+        maximum_step_m=maximum_step,
+    )
+    metadata = asdict(report)
+    metadata['predicted_paths_after_first_step'] = 'pre_repair'
+    return replace(
+        result,
+        setpoints=repaired,
+        predicted_paths=replace_first_future_points(
+            result.predicted_paths, repaired
+        ),
+        collision_repair=metadata,
+    )
 
 
 def controller_from_config(config):
@@ -106,22 +163,5 @@ class BestEffortRepairController:
             setattr(self._controller, name, value)
 
     def compute(self, snapshot):
-        from ..waypoint_repair import repair_waypoints
-
         result = self._controller.compute(snapshot)
-        repaired, report = repair_waypoints(
-            result.setpoints, {}, self.config.safety.geofence,
-            self.config.safety.preferred_separation_m,
-            self.config.safety.collision_repair_max_iterations,
-            snapshot.target_epoch,
-        )
-        metadata = asdict(report)
-        metadata['predicted_paths_after_first_step'] = 'pre_repair'
-        return replace(
-            result,
-            setpoints=repaired,
-            predicted_paths=replace_first_future_points(
-                result.predicted_paths, repaired
-            ),
-            collision_repair=metadata,
-        )
+        return repair_controller_result(self.config, snapshot, result)

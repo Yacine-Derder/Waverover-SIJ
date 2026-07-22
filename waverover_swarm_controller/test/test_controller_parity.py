@@ -8,7 +8,9 @@ from waverover_swarm_controller.controllers.heuristic import HeuristicController
 from waverover_swarm_controller.controllers.heuristic_decentralized import (
     DecentralizedHeuristicController,
 )
-from waverover_swarm_controller.models import SwarmSnapshot, TargetState
+from waverover_swarm_controller.models import (
+    ControllerResult, RobotState, SwarmSnapshot, TargetState,
+)
 
 
 def with_algorithm(config, algorithm):
@@ -82,6 +84,84 @@ def test_relay_count_handles_coincident_and_short_targets(example_config):
 
     assert controller.optimal_relay_count(0.0) == 0
     assert controller.optimal_relay_count(0.01) >= 1
+
+
+def test_distributed_mpc_allocates_weighted_targets_across_collinear_team(
+    example_config, snapshot
+):
+    config = with_algorithm(example_config, 'mpc_distributed')
+    robots = {
+        key: RobotState(key, x, 0.0, 0.0, snapshot.created_at)
+        for key, x in (('r1', 0.5), ('r2', 1.0), ('r3', 1.5))
+    }
+    targets = {
+        'high': TargetState('high', 3.0, 0.0, 10.0),
+        'background': TargetState('background', 0.0, 3.0, 1.0),
+    }
+    selected = replace(snapshot, robots=robots, targets=targets)
+
+    result = controller_from_config(config).compute(selected)
+    agents = result.controller_diagnostics['agents']
+
+    assert agents['r3']['dominant_target_id'] == 'high'
+    assert agents['r3']['effective_target_coefficients']['high'] > 0.0
+    assert any(
+        values['effective_target_coefficients']['high'] == 0.0
+        for robot_id, values in agents.items() if robot_id != 'r3'
+    )
+    assert set(result.setpoints) == set(robots)
+    assert all(result.predicted_paths[key][1] == result.setpoints[key] for key in robots)
+
+    swapped = replace(selected, targets={
+        'high': TargetState('high', 3.0, 0.0, 1.0),
+        'background': TargetState('background', 0.0, 3.0, 12.0),
+    })
+    changed = controller_from_config(config).compute(swapped)
+    assert changed.controller_diagnostics['agents']['r1'][
+        'effective_target_coefficients'
+    ] != agents['r1']['effective_target_coefficients']
+    assert changed.setpoints != result.setpoints
+
+    permuted = replace(
+        selected,
+        robots=dict(reversed(tuple(selected.robots.items()))),
+        targets=dict(reversed(tuple(selected.targets.items()))),
+    )
+    reordered = controller_from_config(config).compute(permuted)
+    assert reordered.setpoints == result.setpoints
+    assert reordered.controller_diagnostics == result.controller_diagnostics
+
+
+@pytest.mark.parametrize('algorithm', ['heuristic', 'heuristic_decentralized'])
+def test_heuristic_outputs_are_snapped_to_selected_connectivity_links(
+    algorithm, example_config, snapshot
+):
+    config = with_algorithm(example_config, algorithm)
+    one_robot = {'r1': RobotState('r1', 0.5, 0.0, 0.0, snapshot.created_at)}
+    selected = replace(
+        snapshot,
+        robots=one_robot,
+        targets={'far': TargetState('far', 4.0, 0.0, 10.0, is_main=True)},
+    )
+
+    controller = controller_from_config(config)
+    controller._controller.compute = lambda chosen: ControllerResult(
+        setpoints={'r1': (4.0, 0.0)},
+        selected_edges=((chosen.station.station_id, 'r1'),),
+        created_at=chosen.created_at,
+        target_epoch=chosen.target_epoch,
+    )
+    result = controller.compute(selected)
+    report = result.collision_repair
+    allowed = (
+        config.communication.maximum_range_m - config.vehicle.turn_radius_m
+    )
+
+    assert report['connectivity_edges']
+    assert math.dist(result.setpoints['r1'], snapshot.station.position) <= allowed + 1e-6
+    assert report['entries']['r1']['original_waypoint'] != result.setpoints['r1']
+    assert report['entries']['r1']['snapped_waypoint'] == result.setpoints['r1']
+    assert report['maximum_link_violation_m'] <= 1e-6
 
 
 @pytest.mark.parametrize(

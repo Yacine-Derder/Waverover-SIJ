@@ -102,6 +102,7 @@ def compute_analysis(data):
             'target_epoch': sample.get('target_epoch', 0),
             'result_state': sample.get('result_state'),
             'solver_status': sample.get('solver_status'),
+            'optimization_mode': sample.get('optimization_mode', ''),
             'solve_duration_sec': sample.get('solve_duration_sec'),
             'communication_cost': communication,
             'target_distance_cost': target,
@@ -489,6 +490,13 @@ def compute_analysis(data):
                 for status in sorted({
                     row['solver_status'] for row in rows
                     if row['solver_status'] is not None
+                })
+            },
+            'optimization_mode_counts': {
+                mode: sum(row['optimization_mode'] == mode for row in rows)
+                for mode in sorted({
+                    row['optimization_mode'] for row in rows
+                    if row['optimization_mode']
                 })
             },
         },

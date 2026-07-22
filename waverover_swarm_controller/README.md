@@ -1,6 +1,6 @@
 # WaveRover swarm controller (operator PC only)
 
-The default target switch period is 20 seconds. Real dispatch treats 0.30 m
+The default target switch period is 20 seconds. Real dispatch treats 0.35 m
 separation as a best-effort preference and sends every algorithm through the
 same deterministic, geofence-aware repair stage. Collision warnings and
 residual violations are telemetry, not trial-latching faults; structural
@@ -64,11 +64,25 @@ Five controllers were ported from `Yacine-Derder/drone-simulator-master`:
 - `mpc_centralized`: the centralized convex problem over a configurable
   horizon; only the first future carrot is returned to the dispatcher.
 - `mpc_distributed`: local per-agent solvers, Fiedler-vector edge selection,
-  predicted neighbor trajectories, and first-future-position output.
+  predicted neighbor trajectories, all-target team allocation, and
+  first-future-position output. Selected non-station neighbors suppress target
+  coefficients when they are better positioned; coefficients are divided by
+  relay burden. The configurable inter-agent weight defaults to the
+  simulator's `2.0`, while target priorities come directly from snapshot
+  weights (normally `10.0` priority and `1.0` background).
 
 Distributed MPC defaults to immutable Jacobi updates: every agent sees the
 same previous-cycle predictions. `distributed_update_semantics: gauss_seidel`
 reproduces the simulator's sequential update choice where practical.
+Telemetry records effective coefficients, dominant targets, selected
+neighbors, burden, objective contributions, update semantics, and local
+statuses for each agent.
+
+The three optimization controllers use a never-fail hierarchy: normal solve,
+connectivity-slack recovery solve, deterministic connectivity recovery, then
+measured-position safe hold. A failed or undispatchable hold is diagnosed but
+does not fault the dispatcher or publish `end_trial`; a later cycle may return
+to its normal solve.
 
 ### Conservative optimization separation model
 
@@ -728,13 +742,14 @@ coordinate again after the reached target has been removed. The handoff delay
 lets the onboard 10 Hz FIFO controller remove the reached point. MPC
 paths are never published as waypoint sequences. A carrot shorter than
 `0.30 m` is extended in its finite nonzero direction, up to the `0.333333 m`
-step limit; a zero direction faults instead of generating NaNs.
+step limit; a zero direction produces a measured-position hold.
 
 An active waypoint older than `active_waypoint_warning_sec` produces a
 non-fatal warning only. Graceful exit, Ctrl-C, SIGTERM, stale/incomplete poses,
-invalid or stale solver output, geofence/separation failure, and malformed
-values still stop new dispatch and send one reliable `Empty` to every rover
-this process actually commanded.
+invalid heuristic output, geofence failure, and malformed values still stop
+new dispatch and send one reliable `Empty` to every rover this process actually
+commanded. Optimization solve/result failures instead use the never-fail
+hierarchy above and never terminate the trial.
 Faults after dispatch begins stay latched until restart. ROS is briefly drained
 before teardown and cleanup is idempotent. Uncommanded rovers receive no
 `end_trial`; dry-run never publishes `end_trial`.

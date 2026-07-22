@@ -274,7 +274,9 @@ class ReplayApp:
             't=%.2f s remaining=%.2f s lambda_2=%s'
             % (
                 telemetry.get('algorithm', config.controller.algorithm),
-                telemetry.get('optimization_mode', ''),
+                telemetry.get(
+                    'controller_mode', telemetry.get('optimization_mode', '')
+                ),
                 telemetry.get('solver_status'),
                 telemetry.get('result_state'),
                 telemetry.get('stop_reason', ''),

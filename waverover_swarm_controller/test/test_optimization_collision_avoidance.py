@@ -9,13 +9,14 @@ import pytest
 
 from waverover_swarm_controller.config import load_experiment
 from waverover_swarm_controller.controllers import controller_from_config
+from waverover_swarm_controller.controllers.base import repair_controller_result
 from waverover_swarm_controller.controllers.collision_avoidance import (
-    CollisionGeometryError,
-    SEPARATION_NUMERIC_MARGIN_M,
     centralized_separation_constraints,
     centralized_soft_separation,
+    CollisionGeometryError,
     distributed_closing_limits,
     pairwise_geometries,
+    SEPARATION_NUMERIC_MARGIN_M,
 )
 from waverover_swarm_controller.controllers.mpc_distributed import (
     DistributedMpcController,
@@ -85,7 +86,9 @@ def test_centralized_six_rover_convergence_is_separation_safe(algorithm):
     config = _smoke_config(algorithm)
     snapshot = _converging_snapshot(config)
 
-    result = controller_from_config(config).compute(snapshot)
+    result = repair_controller_result(
+        config, snapshot, controller_from_config(config).compute(snapshot)
+    )
 
     assert _minimum_distance(result.setpoints) >= (
         config.safety.minimum_separation_m

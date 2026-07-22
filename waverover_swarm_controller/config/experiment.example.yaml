@@ -44,6 +44,7 @@ controller:
   deterministic_seed: 42
   distributed_update_semantics: jacobi
   distributed_inter_agent_weight: 2.0
+  connectivity_recovery_slack_penalty: 10000.0
 
 waypoint_dispatch:
   refresh_period_sec: 1.0

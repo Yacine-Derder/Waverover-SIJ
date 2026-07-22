@@ -24,6 +24,9 @@ def test_calibrated_defaults_and_pc_robot_ids():
     assert config.controller.mpc_max_step_m == pytest.approx(0.333333)
     assert config.controller.minimum_mpc_lookahead_m == pytest.approx(0.30)
     assert config.controller.distributed_inter_agent_weight == pytest.approx(2.0)
+    assert config.controller.connectivity_recovery_slack_penalty == pytest.approx(
+        10000.0
+    )
     assert config.waypoint_dispatch.refresh_period_sec == pytest.approx(1.0)
     assert config.waypoint_dispatch.active_waypoint_warning_sec == pytest.approx(
         10.0

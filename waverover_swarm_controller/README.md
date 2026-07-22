@@ -78,11 +78,37 @@ Telemetry records effective coefficients, dominant targets, selected
 neighbors, burden, objective contributions, update semantics, and local
 statuses for each agent.
 
+Recovery connectivity slack is penalized by
+`controller.connectivity_recovery_slack_penalty` (default `10000.0`). The
+penalty is configurable without changing the hard communication radius.
+
 The three optimization controllers use a never-fail hierarchy: normal solve,
 connectivity-slack recovery solve, deterministic connectivity recovery, then
 measured-position safe hold. A failed or undispatchable hold is diagnosed but
 does not fault the dispatcher or publish `end_trial`; a later cycle may return
 to its normal solve.
+
+Convex and MPC connectivity constraints use exactly
+`maximum_range_m - 2 * turn_radius_m`. Recovery adds one nonnegative slack per
+selected edge and prediction step and minimizes their configured penalty
+before nominal target/link effort. Deterministic recovery combines every
+violated selected-edge direction from the same immutable snapshot and clips
+each rover's combined displacement to `mpc_max_step_m`. It reuses solver edges
+and constructs a station-rooted replacement only when none are usable.
+
+Post-processing has one owner (the coordinator): it checks a complete finite
+mapping, applies bounded geofence/connectivity/movement projections, repairs
+first-step crossings and endpoint/active-waypoint separation, reconciles those
+constraints for a bounded number of iterations, then performs independent
+final validation. Movement projection is last in each reconciliation pass, so
+the physical step is never exceeded; any link or separation constraint that
+cannot simultaneously be met is reported rather than silently hidden.
+
+Every cycle produces a structured execution outcome. Pending updates and
+dispatcher ticks require `dispatch_allowed`, a complete command set, and final
+validation simultaneously. Temporary missing/stale pose snapshots produce
+`pose_unavailable`, preserve existing active commands without refreshing them,
+and automatically retry on the next cycle.
 
 ### Conservative optimization separation model
 

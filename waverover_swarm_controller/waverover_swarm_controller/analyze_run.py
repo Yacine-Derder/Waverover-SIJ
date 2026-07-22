@@ -103,6 +103,15 @@ def compute_analysis(data):
             'result_state': sample.get('result_state'),
             'solver_status': sample.get('solver_status'),
             'optimization_mode': sample.get('optimization_mode', ''),
+            'controller_mode': sample.get(
+                'controller_mode', sample.get('optimization_mode', '')
+            ),
+            'dispatch_allowed': sample.get('dispatch_allowed'),
+            'normal_solver_status': sample.get('normal_solver_status'),
+            'recovery_solver_status': sample.get('recovery_solver_status'),
+            'maximum_connectivity_slack_m': sample.get(
+                'maximum_connectivity_slack_m'
+            ),
             'solve_duration_sec': sample.get('solve_duration_sec'),
             'communication_cost': communication,
             'target_distance_cost': target,
@@ -497,6 +506,13 @@ def compute_analysis(data):
                 for mode in sorted({
                     row['optimization_mode'] for row in rows
                     if row['optimization_mode']
+                })
+            },
+            'controller_mode_counts': {
+                mode: sum(row['controller_mode'] == mode for row in rows)
+                for mode in sorted({
+                    row['controller_mode'] for row in rows
+                    if row['controller_mode']
                 })
             },
         },

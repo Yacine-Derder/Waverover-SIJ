@@ -129,3 +129,25 @@ class ControllerResult:
             sorted((str(first), str(second)) for first, second in self.selected_edges)
         )
         object.__setattr__(self, 'selected_edges', canonical_edges)
+
+
+@dataclass(frozen=True)
+class ControllerExecutionOutcome:
+    """One complete controller attempt and its dispatch authorization."""
+
+    result: Optional[ControllerResult]
+    dispatch_allowed: bool
+    complete_command_set_generated: bool
+    final_command_set_passed_validation: bool
+    controller_mode: str
+    failure_metadata: Mapping = field(default_factory=dict)
+    consecutive_recovery_cycles: int = 0
+    fallback_counters: Mapping = field(default_factory=dict)
+
+    def __post_init__(self):
+        object.__setattr__(
+            self, 'failure_metadata', _frozen_mapping(self.failure_metadata)
+        )
+        object.__setattr__(
+            self, 'fallback_counters', _frozen_mapping(self.fallback_counters)
+        )

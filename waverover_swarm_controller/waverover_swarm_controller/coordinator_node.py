@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import json
+import math
 import signal
 import time
 
@@ -20,11 +21,14 @@ from waverover.stack_config import robot_namespace
 from .config import ConfigError, load_experiment
 from .controllers import controller_from_config
 from .controllers.base import (
+    complete_finite_mapping,
     ControllerUnavailableError,
+    deterministic_connectivity_setpoints,
+    optimization_hard_link_limit,
     repair_controller_result,
 )
 from .metrics import algebraic_connectivity, minimum_pairwise_distance
-from .models import ControllerResult
+from .models import ControllerExecutionOutcome, ControllerResult
 from .pose_aggregation import PoseAggregator, SnapshotUnavailableError
 from .safety import SafetyViolation, validate_controller_result
 from .target_dynamics import TargetManager
@@ -75,6 +79,10 @@ class SwarmCoordinator(Node):
         self._end_sent_for_stop = False
         self._ack_warning_times = {}
         self.onboard_health = {}
+        self.consecutive_recovery_cycles = 0
+        self.fallback_counters = {}
+        self.latest_execution_outcome = None
+        self._last_controller_mode = None
 
         # The PC intentionally loads fleet naming without rover-local identity.
         from waverover.stack_config import (
@@ -218,112 +226,274 @@ class SwarmCoordinator(Node):
             next_target_switch_at=state['next_switch_at'],
         )
 
+    @staticmethod
+    def _failure(error):
+        return {
+            'type': type(error).__name__,
+            'message': str(error),
+        }
+
+    def _finish_outcome(self, result, dispatch_allowed, complete, validated,
+                        mode, failures):
+        counters = dict(getattr(self, 'fallback_counters', {}))
+        if mode.startswith('normal_') or mode in (
+            'heuristic', 'heuristic_decentralized'
+        ):
+            consecutive = 0
+        elif mode in ('pose_unavailable', 'controller_error'):
+            consecutive = getattr(self, 'consecutive_recovery_cycles', 0)
+        else:
+            consecutive = getattr(self, 'consecutive_recovery_cycles', 0) + 1
+        self.consecutive_recovery_cycles = consecutive
+        self.fallback_counters = counters
+        outcome = ControllerExecutionOutcome(
+            result=result,
+            dispatch_allowed=dispatch_allowed,
+            complete_command_set_generated=complete,
+            final_command_set_passed_validation=validated,
+            controller_mode=mode,
+            failure_metadata=failures,
+            consecutive_recovery_cycles=consecutive,
+            fallback_counters=counters,
+        )
+        previous = getattr(self, '_last_controller_mode', None)
+        if previous != mode:
+            logger = self.get_logger() if hasattr(self, 'get_logger') else None
+            if logger is not None:
+                message = 'Controller mode transition: %s -> %s' % (
+                    previous or 'startup', mode
+                )
+                log_method = getattr(
+                    logger,
+                    'info' if mode.startswith('normal_') else 'warn',
+                    None,
+                )
+                if log_method is not None:
+                    log_method(message)
+            self._last_controller_mode = mode
+        self.latest_execution_outcome = outcome
+        return outcome
+
+    def _note_fallback_attempt(self, mode):
+        counters = dict(getattr(self, 'fallback_counters', {}))
+        counters[mode] = counters.get(mode, 0) + 1
+        self.fallback_counters = counters
+
+    def _process_candidate(self, snapshot, result):
+        if not complete_finite_mapping(snapshot, result):
+            raise SafetyViolation(
+                'Controller candidate is incomplete or non-finite.'
+            )
+        diagnostics = dict(result.controller_diagnostics)
+        for field in (
+            'maximum_connectivity_slack_m', 'total_connectivity_slack_m'
+        ):
+            if field in diagnostics and (
+                not math.isfinite(float(diagnostics[field]))
+                or float(diagnostics[field]) < 0.0
+            ):
+                raise SafetyViolation(
+                    '%s must be finite and nonnegative.' % field
+                )
+        result = SwarmCoordinator._repair_result(self, snapshot, result)
+        if not complete_finite_mapping(snapshot, result):
+            raise SafetyViolation(
+                'Repaired controller candidate is incomplete or non-finite.'
+            )
+        collision_validation = validate_controller_result(
+            self.config, snapshot, result, time.monotonic()
+        )
+        self.latest_collision_events = (
+            [] if collision_validation is True else collision_validation
+        )
+        return result
+
     def _compute_valid_result(self, snapshot):
         optimization = self.config.controller.algorithm in (
             'convex', 'mpc_centralized', 'mpc_distributed'
         )
-        self._optimization_dispatch_allowed = True
-        attempts = [('normal', self.controller.compute)]
+        if not optimization:
+            result = SwarmCoordinator._process_candidate(
+                self, snapshot, self.controller.compute(snapshot)
+            )
+            return SwarmCoordinator._finish_outcome(
+                self,
+                result, True, True, True,
+                self.config.controller.algorithm, {},
+            )
+        normal_mode = (
+            'normal_convex'
+            if self.config.controller.algorithm == 'convex'
+            else 'normal_mpc'
+        )
+        recovery_mode = (
+            'recovery_convex'
+            if self.config.controller.algorithm == 'convex'
+            else 'recovery_mpc'
+        )
+        attempts = [(normal_mode, self.controller.compute)]
         recovery = getattr(self.controller, 'compute_recovery', None)
-        if optimization and recovery is not None:
-            attempts.append(('recovery', recovery))
-        errors = []
-        for label, operation in attempts:
+        if recovery is not None:
+            attempts.append((recovery_mode, recovery))
+        failures = {
+            'normal_solver_status': None,
+            'recovery_solver_status': None,
+            'normal_failure_reason': '',
+            'recovery_failure_reason': '',
+            'controller_exception': None,
+            'maximum_connectivity_slack_m': 0.0,
+            'total_connectivity_slack_m': 0.0,
+            'selected_edges_replaced': False,
+        }
+        selected_edges = ()
+        for mode, operation in attempts:
+            if mode == recovery_mode:
+                SwarmCoordinator._note_fallback_attempt(self, mode)
             try:
                 result = operation(snapshot)
-                result = SwarmCoordinator._repair_result(self, snapshot, result)
-                collision_validation = validate_controller_result(
-                    self.config, snapshot, result, time.monotonic()
+                selected_edges = result.selected_edges or selected_edges
+                status_key = (
+                    'normal_solver_status'
+                    if mode == normal_mode else 'recovery_solver_status'
                 )
-                self.latest_collision_events = (
-                    [] if collision_validation is True else collision_validation
+                failures[status_key] = result.solver_status
+                diagnostics = dict(result.controller_diagnostics)
+                failures['maximum_connectivity_slack_m'] = diagnostics.get(
+                    'maximum_connectivity_slack_m', 0.0
                 )
-                self.latest_rejected_result = None
-                return result
-            except Exception as error:  # solver/controller failures are recoverable
-                errors.append('%s: %s' % (label, error))
-                self.latest_rejected_result = locals().get('result')
-                if not optimization:
-                    raise
-        # Deterministic connectivity recovery moves each child toward a stable
-        # station-rooted nearest tree, without exceeding the physical step.
-        for mode in ('deterministic_recovery', 'safe_hold'):
-            points = {
-                robot_id: snapshot.robots[robot_id].position
-                for robot_id in sorted(snapshot.robots)
-            }
-            edges = ()
-            if mode == 'deterministic_recovery':
-                from .controllers.convex import _tree_edges
-                import math
-
-                edges = _tree_edges(snapshot)
-                maximum_link = (
-                    self.config.communication.maximum_range_m
-                    - self.config.vehicle.turn_radius_m
+                failures['total_connectivity_slack_m'] = diagnostics.get(
+                    'total_connectivity_slack_m', 0.0
                 )
-                for parent, robot_id in edges:
-                    parent_point = (
-                        snapshot.station.position
-                        if parent == snapshot.station.station_id
-                        else points[parent]
-                    )
-                    current = snapshot.robots[robot_id].position
-                    distance = math.dist(current, parent_point)
-                    if distance > maximum_link and distance > 1e-12:
-                        travel = min(
-                            self.config.controller.mpc_max_step_m,
-                            distance - maximum_link,
-                        )
-                        points[robot_id] = (
-                            current[0] + travel
-                            * (parent_point[0] - current[0]) / distance,
-                            current[1] + travel
-                            * (parent_point[1] - current[1]) / distance,
-                        )
-            result = ControllerResult(
-                setpoints=points,
-                predicted_paths={
-                    key: (point, point) for key, point in points.items()
-                },
-                selected_edges=edges,
-                solver_status=mode,
-                diagnostic='; '.join(errors),
-                created_at=time.monotonic(),
-                target_epoch=snapshot.target_epoch,
-                optimization_mode=mode,
-            )
-            try:
-                if mode != 'safe_hold':
-                    result = SwarmCoordinator._repair_result(
-                        self, snapshot, result
-                    )
-                collision_validation = validate_controller_result(
-                    self.config, snapshot, result, time.monotonic()
-                )
-                if (
-                    mode == 'deterministic_recovery'
-                    and result.collision_repair.get(
-                        'maximum_link_violation_m', 0.0
-                    ) > 1e-6
-                ):
-                    raise SafetyViolation(
-                        'Deterministic recovery cannot restore every link '
-                        'within one physical step.'
-                    )
-                self.latest_collision_events = (
-                    [] if collision_validation is True else collision_validation
+                result = SwarmCoordinator._process_candidate(
+                    self, snapshot, result
                 )
                 self.latest_rejected_result = None
-                return result
+                return SwarmCoordinator._finish_outcome(
+                    self,
+                    result, True, True, True, mode, failures
+                )
             except Exception as error:
-                errors.append('%s: %s' % (mode, error))
-        # Keep the process and dispatcher healthy, but do not enqueue a hold
-        # which failed pre-dispatch validation.
-        self._optimization_dispatch_allowed = False
-        self.latest_stop_reason = '; '.join(errors)
-        self.latest_rejected_result = result
-        return replace(result, diagnostic=self.latest_stop_reason)
+                failure = SwarmCoordinator._failure(error)
+                reason_key = (
+                    'normal_failure_reason'
+                    if mode == normal_mode else 'recovery_failure_reason'
+                )
+                status_key = (
+                    'normal_solver_status'
+                    if mode == normal_mode else 'recovery_solver_status'
+                )
+                failures[reason_key] = failure['message']
+                failures['controller_exception'] = failure
+                failures[
+                    'normal_controller_exception'
+                    if mode == normal_mode else 'recovery_controller_exception'
+                ] = failure
+                failures['distributed_local_solver_statuses'] = {
+                    robot_id: values.get('solver_status')
+                    for robot_id, values in sorted(getattr(
+                        self.controller, '_last_agent_diagnostics', {}
+                    ).items())
+                }
+                failures[status_key] = failures[status_key] or getattr(
+                    self.controller, '_last_solver_status', 'exception'
+                )
+                selected_edges = selected_edges or getattr(
+                    self.controller, '_last_selected_edges', ()
+                )
+                self.latest_rejected_result = locals().get('result')
+
+        SwarmCoordinator._note_fallback_attempt(
+            self, 'deterministic_recovery'
+        )
+        points, canonical_edges = deterministic_connectivity_setpoints(
+            self.config, snapshot, selected_edges
+        )
+        if not canonical_edges:
+            from .controllers.convex import _tree_edges
+            selected_edges = _tree_edges(snapshot)
+            failures['selected_edges_replaced'] = True
+            points, canonical_edges = deterministic_connectivity_setpoints(
+                self.config, snapshot, selected_edges
+            )
+        selected_edges = canonical_edges
+        deterministic = ControllerResult(
+            setpoints=points,
+            predicted_paths={
+                key: (snapshot.robots[key].position, point)
+                for key, point in points.items()
+            },
+            selected_edges=selected_edges,
+            solver_status='deterministic_recovery',
+            diagnostic='Optimization stages failed.',
+            created_at=time.monotonic(),
+            target_epoch=snapshot.target_epoch,
+            optimization_mode='deterministic_recovery',
+            controller_diagnostics={
+                'hard_link_limit_m': optimization_hard_link_limit(self.config)
+            },
+        )
+        try:
+            deterministic = SwarmCoordinator._process_candidate(
+                self, snapshot, deterministic
+            )
+            if deterministic.collision_repair.get(
+                'maximum_link_violation_m', 0.0
+            ) > 1e-6:
+                raise SafetyViolation(
+                    'Deterministic recovery retains a link violation.'
+                )
+            self.latest_rejected_result = None
+            return SwarmCoordinator._finish_outcome(
+                self,
+                deterministic, True, True, True,
+                'deterministic_recovery', failures,
+            )
+        except Exception as error:
+            failures['deterministic_failure_reason'] = str(error)
+            self.latest_rejected_result = deterministic
+
+        SwarmCoordinator._note_fallback_attempt(self, 'safe_hold')
+        points = {
+            robot_id: snapshot.robots[robot_id].position
+            for robot_id in sorted(snapshot.robots)
+        }
+        hold = ControllerResult(
+            setpoints=points,
+            predicted_paths={key: (point, point) for key, point in points.items()},
+            selected_edges=selected_edges,
+            solver_status='safe_hold',
+            diagnostic='Optimization and deterministic recovery failed.',
+            created_at=time.monotonic(),
+            target_epoch=snapshot.target_epoch,
+            optimization_mode='safe_hold',
+        )
+        try:
+            if not complete_finite_mapping(snapshot, hold):
+                raise SafetyViolation('Safe hold is incomplete or non-finite.')
+            validation = validate_controller_result(
+                self.config, snapshot, hold, time.monotonic()
+            )
+            self.latest_collision_events = [] if validation is True else validation
+            self.latest_rejected_result = None
+            return SwarmCoordinator._finish_outcome(
+                self,
+                hold, True, True, True, 'safe_hold', failures
+            )
+        except Exception as error:
+            failures['safe_hold_failure_reason'] = str(error)
+            self.latest_rejected_result = hold
+            SwarmCoordinator._note_fallback_attempt(
+                self, 'non_dispatching_safe_hold'
+            )
+            return SwarmCoordinator._finish_outcome(
+                self,
+                replace(hold, optimization_mode='non_dispatching_safe_hold'),
+                False,
+                complete_finite_mapping(snapshot, hold),
+                False,
+                'non_dispatching_safe_hold',
+                failures,
+            )
 
     def _repair_result(self, snapshot, result):
         active = {
@@ -360,13 +530,18 @@ class SwarmCoordinator(Node):
             snapshot = self._snapshot()
         except SnapshotUnavailableError as error:
             self.latest_stop_reason = str(error)
-            if self.dispatcher.commanded_robot_ids:
-                self._stop_trial('stale/incomplete required pose: %s' % error)
-            self._publish_controller_telemetry(None, None, 'faulted')
+            SwarmCoordinator._finish_outcome(
+                self,
+                None, False, False, False, 'pose_unavailable',
+                {'pose_failure_reason': str(error)},
+            )
+            self._publish_controller_telemetry(
+                None, None, 'pose_unavailable'
+            )
             self._publish_diagnostics()
             return
         try:
-            result = self._compute_valid_result(snapshot)
+            outcome = self._compute_valid_result(snapshot)
         except (
             SafetyViolation,
             ControllerUnavailableError,
@@ -374,11 +549,15 @@ class SwarmCoordinator(Node):
             ValueError,
         ) as error:
             self.latest_stop_reason = str(error)
-            optimization = self.config.controller.algorithm in (
-                'convex', 'mpc_centralized', 'mpc_distributed'
+            outcome = SwarmCoordinator._finish_outcome(
+                self,
+                self.latest_rejected_result,
+                False,
+                False,
+                False,
+                'controller_error',
+                {'controller_exception': SwarmCoordinator._failure(error)},
             )
-            if self.dispatcher.commanded_robot_ids and not optimization:
-                self._stop_trial('invalid controller cycle: %s' % error)
             rejected = self.latest_rejected_result
             self._publish_controller_telemetry(
                 snapshot,
@@ -387,17 +566,22 @@ class SwarmCoordinator(Node):
             )
             self._publish_diagnostics()
             return
+        result = outcome.result
         # Clear transient pre-dispatch warnings after a valid cycle. Once any
         # rover has been commanded, faults stay latched until process restart.
         if (
-            not self.dispatcher.faulted
-            and getattr(self, '_optimization_dispatch_allowed', True)
+            not self.dispatcher.faulted and outcome.dispatch_allowed
         ):
             self.latest_stop_reason = ''
 
         self.latest_snapshot = snapshot
         self.latest_result = result
-        if not self.dispatcher.faulted:
+        if (
+            not self.dispatcher.faulted
+            and outcome.dispatch_allowed
+            and outcome.complete_command_set_generated
+            and outcome.final_command_set_passed_validation
+        ):
             try:
                 self.dispatcher.update_pending(
                     result.setpoints, getattr(result, 'target_epoch', 0)
@@ -412,11 +596,11 @@ class SwarmCoordinator(Node):
             result,
             (
                 'valid'
-                if getattr(self, '_optimization_dispatch_allowed', True)
-                else 'non_dispatching_safe_hold'
+                if outcome.dispatch_allowed else outcome.controller_mode
             ),
         )
-        self._publish_visualization(snapshot, result)
+        if result is not None:
+            self._publish_visualization(snapshot, result)
         self._publish_diagnostics()
 
     def _dispatch(self, snapshot):
@@ -547,12 +731,15 @@ class SwarmCoordinator(Node):
             'rejected' if self.latest_rejected_result is not None
             else ('valid' if self.latest_result is not None else 'none')
         )
+        outcome = getattr(self, 'latest_execution_outcome', None)
         values = {
             'algorithm': self.config.controller.algorithm,
             'dry_run': str(self.config.safety.dry_run),
             'dispatch_state': (
                 'dry_run' if self.config.safety.dry_run else
-                ('faulted' if self.dispatcher.faulted else 'automatic')
+                ('faulted' if self.dispatcher.faulted else
+                 ('inhibited' if outcome and not outcome.dispatch_allowed
+                  else 'automatic'))
             ),
             'controller_result_state': result_state,
             'solver_status': (
@@ -568,6 +755,25 @@ class SwarmCoordinator(Node):
             'selected_edges': (
                 str(diagnostic_result.selected_edges)
                 if diagnostic_result else 'none'
+            ),
+            'controller_mode': (
+                outcome.controller_mode if outcome else 'none'
+            ),
+            'dispatch_allowed': (
+                outcome.dispatch_allowed if outcome else False
+            ),
+            'complete_command_set_generated': (
+                outcome.complete_command_set_generated if outcome else False
+            ),
+            'final_command_set_passed_validation': (
+                outcome.final_command_set_passed_validation
+                if outcome else False
+            ),
+            'consecutive_recovery_cycles': (
+                outcome.consecutive_recovery_cycles if outcome else 0
+            ),
+            'fallback_counters': (
+                dict(outcome.fallback_counters) if outcome else {}
             ),
         }
         for robot_id, age in ages.items():
@@ -685,13 +891,19 @@ class SwarmCoordinator(Node):
                 result,
                 result_state,
                 self.get_clock().now().to_msg(),
-                not self.config.safety.dry_run and not self.dispatcher.faulted,
+                not self.config.safety.dry_run
+                and not self.dispatcher.faulted
+                and (
+                    self.latest_execution_outcome is None
+                    or self.latest_execution_outcome.dispatch_allowed
+                ),
                 self.latest_stop_reason,
                 pose_ages,
                 active,
                 pending,
                 dispatch_observability,
                 self.latest_handoff,
+                self.latest_execution_outcome,
             )
             message = String()
             message.data = canonical_json(payload)

@@ -10,7 +10,7 @@ from .metrics import (
 )
 
 
-CONTROLLER_TELEMETRY_SCHEMA_VERSION = 6
+CONTROLLER_TELEMETRY_SCHEMA_VERSION = 7
 
 
 def _point(point):
@@ -54,6 +54,7 @@ def build_controller_telemetry(
     pending_waypoints,
     dispatch_observability,
     latest_handoff,
+    execution_outcome=None,
 ):
     robots = {}
     current_points = {}
@@ -98,6 +99,12 @@ def build_controller_telemetry(
             'nanosec': int(ros_timestamp.nanosec),
         },
         'algorithm': config.controller.algorithm,
+        'controller_mode': (
+            execution_outcome.controller_mode
+            if execution_outcome is not None else (
+                result.optimization_mode if result is not None else ''
+            )
+        ),
         'result_state': str(result_state),
         'commands_enabled': bool(commands_enabled),
         'dry_run': bool(config.safety.dry_run),
@@ -235,6 +242,63 @@ def build_controller_telemetry(
         'solver_status': result.solver_status if result is not None else None,
         'optimization_mode': (
             result.optimization_mode if result is not None else ''
+        ),
+        'normal_solver_status': (
+            execution_outcome.failure_metadata.get('normal_solver_status')
+            if execution_outcome is not None else None
+        ),
+        'recovery_solver_status': (
+            execution_outcome.failure_metadata.get('recovery_solver_status')
+            if execution_outcome is not None else None
+        ),
+        'normal_failure_reason': (
+            execution_outcome.failure_metadata.get(
+                'normal_failure_reason', ''
+            ) if execution_outcome is not None else ''
+        ),
+        'recovery_failure_reason': (
+            execution_outcome.failure_metadata.get(
+                'recovery_failure_reason', ''
+            ) if execution_outcome is not None else ''
+        ),
+        'maximum_connectivity_slack_m': (
+            execution_outcome.failure_metadata.get(
+                'maximum_connectivity_slack_m', 0.0
+            ) if execution_outcome is not None else 0.0
+        ),
+        'total_connectivity_slack_m': (
+            execution_outcome.failure_metadata.get(
+                'total_connectivity_slack_m', 0.0
+            ) if execution_outcome is not None else 0.0
+        ),
+        'consecutive_recovery_cycles': (
+            execution_outcome.consecutive_recovery_cycles
+            if execution_outcome is not None else 0
+        ),
+        'fallback_counters': (
+            dict(execution_outcome.fallback_counters)
+            if execution_outcome is not None else {}
+        ),
+        'complete_command_set_generated': (
+            execution_outcome.complete_command_set_generated
+            if execution_outcome is not None else result is not None
+        ),
+        'final_command_set_passed_validation': (
+            execution_outcome.final_command_set_passed_validation
+            if execution_outcome is not None else result_state == 'valid'
+        ),
+        'dispatch_allowed': (
+            execution_outcome.dispatch_allowed
+            if execution_outcome is not None else bool(commands_enabled)
+        ),
+        'controller_exception': (
+            execution_outcome.failure_metadata.get('controller_exception')
+            if execution_outcome is not None else None
+        ),
+        'distributed_local_solver_statuses': (
+            execution_outcome.failure_metadata.get(
+                'distributed_local_solver_statuses', {}
+            ) if execution_outcome is not None else {}
         ),
         'controller_diagnostics': (
             dict(result.controller_diagnostics) if result is not None else {}

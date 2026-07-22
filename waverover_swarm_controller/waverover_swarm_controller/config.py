@@ -49,6 +49,7 @@ class ControllerConfig:
     deterministic_seed: int
     distributed_update_semantics: str
     distributed_inter_agent_weight: float = 2.0
+    connectivity_recovery_slack_penalty: float = 10000.0
 
 
 @dataclass(frozen=True)
@@ -595,6 +596,13 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
             distributed_inter_agent_weight=_finite(
                 controller_data.get('distributed_inter_agent_weight', 2.0),
                 'controller.distributed_inter_agent_weight', nonnegative=True,
+            ),
+            connectivity_recovery_slack_penalty=_finite(
+                controller_data.get(
+                    'connectivity_recovery_slack_penalty', 10000.0
+                ),
+                'controller.connectivity_recovery_slack_penalty',
+                positive=True,
             ),
         ),
         waypoint_dispatch=DispatchConfig(

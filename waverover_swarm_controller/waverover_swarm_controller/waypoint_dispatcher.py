@@ -1,7 +1,10 @@
 """Event-triggered dispatcher that respects the onboard FIFO."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
+
+
+SUPERSEDED_TOKEN_CACHE_SIZE = 32
 
 
 def token_value(token):
@@ -23,12 +26,17 @@ class DispatchAction:
 @dataclass
 class RoverDispatchState:
     active_waypoint: tuple = None
+    active_requested_waypoint: tuple = None
     active_token: tuple = None
     active_target_epoch: int = 0
     pending_waypoint: tuple = None
+    pending_requested_waypoint: tuple = None
     pending_target_epoch: int = 0
     active_objective_revision: int = 0
     pending_objective_revision: int = 0
+    active_command_revision: int = 0
+    pending_command_revision: int = 0
+    pending_supersede: bool = False
     active_published_at: float = None
     last_published_at: float = None
     refresh_count: int = 0
@@ -47,6 +55,13 @@ class RoverDispatchState:
     last_failed_target_epoch: int = 0
     failure_count: int = 0
     unmatched_failure_count: int = 0
+    retained_due_to_deadband: bool = False
+    deadband_retention_count: int = 0
+    superseded_tokens: list = field(default_factory=list)
+    superseded_token_count: int = 0
+    superseded_acknowledgement_count: int = 0
+    last_superseded_token: tuple = None
+    last_superseded_by_token: tuple = None
 
 
 class WaypointDispatcher:
@@ -72,35 +87,84 @@ class WaypointDispatcher:
             if state.ever_commanded
         ))
 
-    def update_pending(self, setpoints, target_epoch=0, objective_revision=None):
+    def update_pending(
+        self, setpoints, target_epoch=0, objective_revision=None,
+        command_revision=None, allow_supersession=False,
+        waypoint_deadband_m=0.0,
+    ):
         revision = (
             int(target_epoch) if objective_revision is None
             else int(objective_revision)
         )
+        generation = (
+            revision if command_revision is None else int(command_revision)
+        )
+        deadband = max(0.0, float(waypoint_deadband_m))
         updated = False
         for robot_id, point in setpoints.items():
             if robot_id not in self.states:
                 raise ValueError('Unknown dispatcher robot %s.' % robot_id)
             state = self.states[robot_id]
-            if revision < max(
-                state.pending_objective_revision,
-                state.active_objective_revision,
-            ):
+            incoming = (revision, generation)
+            newest = max(
+                (state.pending_objective_revision,
+                 state.pending_command_revision),
+                (state.active_objective_revision,
+                 state.active_command_revision),
+            )
+            if incoming < newest:
                 continue
             updated = True
-            state.pending_waypoint = (
+            candidate = (
                 float(point[0]),
                 float(point[1]),
             )
             state.pending_target_epoch = int(target_epoch)
             state.pending_objective_revision = revision
+            state.pending_command_revision = generation
+            state.retained_due_to_deadband = False
+            active_reference = (
+                state.active_requested_waypoint
+                if state.active_requested_waypoint is not None
+                else state.active_waypoint
+            )
+            if (
+                allow_supersession
+                and active_reference is not None
+                and math.dist(candidate, active_reference) <= deadband
+            ):
+                # This newest reactive generation intentionally retains the
+                # active token and invalidates any older pending generation.
+                state.pending_waypoint = None
+                state.pending_requested_waypoint = None
+                state.pending_supersede = False
+                state.retained_due_to_deadband = True
+                state.deadband_retention_count += 1
+                state.handoff_cause = 'reactive_deadband_retained'
+                continue
+            state.pending_waypoint = candidate
+            state.pending_requested_waypoint = candidate
+            state.pending_supersede = bool(
+                allow_supersession and state.active_waypoint is not None
+            )
         if updated:
             self._failed_activation_signature = None
             self.last_activation_failure = ''
 
     def _publish_pending(self, robot_id, state, now):
         point = state.pending_waypoint
+        superseded_token = (
+            state.active_token
+            if state.pending_supersede and state.active_token is not None
+            else None
+        )
+        if superseded_token is not None:
+            state.superseded_tokens.append(tuple(superseded_token))
+            del state.superseded_tokens[:-SUPERSEDED_TOKEN_CACHE_SIZE]
+            state.superseded_token_count += 1
+            state.last_superseded_token = tuple(superseded_token)
         state.active_waypoint = point
+        state.active_requested_waypoint = state.pending_requested_waypoint
         # A stamp-shaped, process-local correlation token. The ROS boundary
         # may replace it, but refreshes always reuse this exact value.
         token_ns = max(
@@ -112,15 +176,25 @@ class WaypointDispatcher:
         state.active_token = candidate
         state.active_target_epoch = state.pending_target_epoch
         state.active_objective_revision = state.pending_objective_revision
+        state.active_command_revision = state.pending_command_revision
         state.pending_waypoint = None
+        state.pending_requested_waypoint = None
+        state.pending_supersede = False
         state.active_published_at = now
         state.last_published_at = now
         state.refresh_count = 0
-        state.handoff_cause = 'initial' if not state.ever_commanded else 'acknowledgement'
+        state.handoff_cause = (
+            'reactive_supersession' if superseded_token is not None
+            else 'initial' if not state.ever_commanded
+            else 'acknowledgement'
+        )
         state.suppression_reason = ''
         state.ever_commanded = True
+        if superseded_token is not None:
+            state.last_superseded_by_token = state.active_token
         return DispatchAction(
             'waypoint', robot_id, point=point, token=state.active_token,
+            reason=state.handoff_cause,
             target_epoch=state.active_target_epoch,
             objective_revision=state.active_objective_revision,
         )
@@ -129,7 +203,9 @@ class WaypointDispatcher:
         return (
             tuple(sorted(
                 (robot_id, self.states[robot_id].pending_waypoint,
-                 self.states[robot_id].pending_objective_revision)
+                 self.states[robot_id].pending_objective_revision,
+                 self.states[robot_id].pending_command_revision,
+                 self.states[robot_id].pending_supersede)
                 for robot_id in robot_ids
             )),
             tuple(sorted(
@@ -144,7 +220,10 @@ class WaypointDispatcher:
         robot_ids = tuple(sorted(
             robot_id for robot_id in robot_ids
             if self.states[robot_id].pending_waypoint is not None
-            and self.states[robot_id].active_waypoint is None
+            and (
+                self.states[robot_id].active_waypoint is None
+                or self.states[robot_id].pending_supersede
+            )
         ))
         if not robot_ids:
             return []
@@ -221,6 +300,7 @@ class WaypointDispatcher:
         if not reason:
             return False
         state.pending_waypoint = None
+        state.pending_requested_waypoint = None
         state.suppression_reason = reason
         state.suppression_count += 1
         state.handoff_cause = 'suppressed'
@@ -242,7 +322,10 @@ class WaypointDispatcher:
         )
         if not valid:
             if state is not None:
-                state.unmatched_acknowledgement_count += 1
+                if token is not None and tuple(token) in state.superseded_tokens:
+                    state.superseded_acknowledgement_count += 1
+                else:
+                    state.unmatched_acknowledgement_count += 1
             return []
         state.last_acknowledged_token = state.active_token
         state.last_acknowledged_waypoint = state.active_waypoint
@@ -250,6 +333,7 @@ class WaypointDispatcher:
         state.last_acknowledged_target_epoch = state.active_target_epoch
         state.acknowledgement_count += 1
         state.active_waypoint = None
+        state.active_requested_waypoint = None
         state.active_token = None
         state.active_published_at = None
         state.last_published_at = None
@@ -284,6 +368,7 @@ class WaypointDispatcher:
         state.last_failed_target_epoch = state.active_target_epoch
         state.failure_count += 1
         state.active_waypoint = None
+        state.active_requested_waypoint = None
         state.active_token = None
         state.active_published_at = None
         state.last_published_at = None
@@ -300,6 +385,12 @@ class WaypointDispatcher:
         eligible = []
         for robot_id in sorted(self.states):
             state = self.states[robot_id]
+            if (
+                state.pending_waypoint is not None
+                and state.pending_supersede
+            ):
+                eligible.append(robot_id)
+                continue
             if state.active_waypoint is None:
                 if state.pending_waypoint is not None:
                     robot = snapshot.robots.get(robot_id) if snapshot else None
@@ -331,7 +422,9 @@ class WaypointDispatcher:
             )
             output[robot_id] = {
                 'active_waypoint': state.active_waypoint,
+                'active_requested_waypoint': state.active_requested_waypoint,
                 'pending_waypoint': state.pending_waypoint,
+                'pending_requested_waypoint': state.pending_requested_waypoint,
                 'active_token': token_value(state.active_token),
                 'last_acknowledged_token': token_value(
                     state.last_acknowledged_token
@@ -356,6 +449,21 @@ class WaypointDispatcher:
                 'pending_target_epoch': state.pending_target_epoch,
                 'active_objective_revision': state.active_objective_revision,
                 'pending_objective_revision': state.pending_objective_revision,
+                'active_command_revision': state.active_command_revision,
+                'pending_command_revision': state.pending_command_revision,
+                'pending_supersede': state.pending_supersede,
+                'retained_due_to_deadband': state.retained_due_to_deadband,
+                'deadband_retention_count': state.deadband_retention_count,
+                'superseded_token_count': state.superseded_token_count,
+                'superseded_acknowledgement_count': (
+                    state.superseded_acknowledgement_count
+                ),
+                'last_superseded_token': token_value(
+                    state.last_superseded_token
+                ),
+                'last_superseded_by_token': token_value(
+                    state.last_superseded_by_token
+                ),
                 'active_waypoint_age_sec': active_age,
                 'last_publication_monotonic_sec': state.last_published_at,
                 'last_publication_age_sec': publication_age,
@@ -374,8 +482,12 @@ class WaypointDispatcher:
     def stop(self):
         for state in self.states.values():
             state.active_waypoint = None
+            state.active_requested_waypoint = None
             state.active_token = None
             state.pending_waypoint = None
+            state.pending_requested_waypoint = None
+            state.pending_supersede = False
             state.active_published_at = None
             state.last_published_at = None
             state.refresh_count = 0
+            state.superseded_tokens.clear()

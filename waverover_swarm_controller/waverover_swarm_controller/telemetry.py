@@ -3,6 +3,7 @@
 import json
 import math
 
+from .controllers.base import controller_schedule
 from .metrics import (
     algebraic_connectivity,
     minimum_pairwise_with_ids,
@@ -10,7 +11,7 @@ from .metrics import (
 )
 
 
-CONTROLLER_TELEMETRY_SCHEMA_VERSION = 8
+CONTROLLER_TELEMETRY_SCHEMA_VERSION = 9
 
 
 def _point(point):
@@ -58,6 +59,7 @@ def build_controller_telemetry(
     computation_reason='not_computed',
     objective_revision=0,
     controller_compute_count=0,
+    reactive_compute_count=0,
     activation_repair=None,
 ):
     robots = {}
@@ -115,6 +117,10 @@ def build_controller_telemetry(
         'computation_reason': str(computation_reason),
         'objective_revision': int(objective_revision),
         'controller_compute_count': int(controller_compute_count),
+        'reactive_compute_count': int(reactive_compute_count),
+        'controller_schedule': controller_schedule(
+            config.controller.algorithm
+        ).value,
         'result_state': str(result_state),
         'commands_enabled': bool(commands_enabled),
         'dry_run': bool(config.safety.dry_run),
@@ -166,6 +172,16 @@ def build_controller_telemetry(
                 for robot_id, point in result.setpoints.items()
             } if result is not None else {}
         ),
+        'locally_computed_waypoints': (
+            {
+                robot_id: _point(point)
+                for robot_id, point in sorted(
+                    dict(result.controller_diagnostics).get(
+                        'locally_computed_waypoints', {}
+                    ).items()
+                )
+            } if result is not None else {}
+        ),
         'dispatched_waypoints': {
             robot_id: None if point is None else _point(point)
             for robot_id, point in sorted(active_waypoints.items())
@@ -184,9 +200,19 @@ def build_controller_telemetry(
                     None if values['active_waypoint'] is None else
                     _point(values['active_waypoint'])
                 ),
+                'active_requested_waypoint': (
+                    None
+                    if values.get('active_requested_waypoint') is None else
+                    _point(values['active_requested_waypoint'])
+                ),
                 'pending_waypoint': (
                     None if values['pending_waypoint'] is None else
                     _point(values['pending_waypoint'])
+                ),
+                'pending_requested_waypoint': (
+                    None
+                    if values.get('pending_requested_waypoint') is None else
+                    _point(values['pending_requested_waypoint'])
                 ),
                 'active_waypoint_age_sec': (
                     None if values['active_waypoint_age_sec'] is None else
@@ -248,6 +274,33 @@ def build_controller_telemetry(
                 'pending_objective_revision': int(values.get(
                     'pending_objective_revision', 0
                 )),
+                'active_command_revision': int(values.get(
+                    'active_command_revision', 0
+                )),
+                'pending_command_revision': int(values.get(
+                    'pending_command_revision', 0
+                )),
+                'pending_supersede': bool(values.get(
+                    'pending_supersede', False
+                )),
+                'retained_due_to_deadband': bool(values.get(
+                    'retained_due_to_deadband', False
+                )),
+                'deadband_retention_count': int(values.get(
+                    'deadband_retention_count', 0
+                )),
+                'superseded_token_count': int(values.get(
+                    'superseded_token_count', 0
+                )),
+                'superseded_acknowledgement_count': int(values.get(
+                    'superseded_acknowledgement_count', 0
+                )),
+                'last_superseded_token': values.get(
+                    'last_superseded_token'
+                ),
+                'last_superseded_by_token': values.get(
+                    'last_superseded_by_token'
+                ),
             }
             for robot_id, values in sorted(dispatch_observability.items())
         },

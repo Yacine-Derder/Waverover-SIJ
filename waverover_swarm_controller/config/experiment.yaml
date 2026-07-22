@@ -38,7 +38,9 @@ controller:
   # Empty heuristic blocks are intentional: they use only common parameters.
   algorithms:
     heuristic: {}
-    heuristic_decentralized: {}
+    heuristic_decentralized:
+      waypoint_deadband_m: 0.05
+      ordering_hysteresis_m: 0.05
     convex:
       connectivity_recovery_slack_penalty: 10000.0
     mpc_centralized:

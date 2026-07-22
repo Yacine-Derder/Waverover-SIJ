@@ -32,6 +32,12 @@ def test_calibrated_defaults_and_pc_robot_ids():
     assert config.controller.connectivity_recovery_slack_penalty == pytest.approx(
         10000.0
     )
+    assert config.controller.decentralized_waypoint_deadband_m == pytest.approx(
+        0.05
+    )
+    assert config.controller.decentralized_ordering_hysteresis_m == pytest.approx(
+        0.05
+    )
     assert config.waypoint_dispatch.refresh_period_sec == pytest.approx(1.0)
     assert config.waypoint_dispatch.active_waypoint_warning_sec == pytest.approx(
         10.0
@@ -44,7 +50,7 @@ def test_calibrated_defaults_and_pc_robot_ids():
     )
     assert config.target_dynamics.switch_period_sec == pytest.approx(20.0)
     assert not config.safety.dry_run
-    assert config.safety.preferred_separation_m == pytest.approx(0.5)
+    assert config.safety.preferred_separation_m == pytest.approx(0.4)
     assert config.synthetic_mcs.mode == 'random_walk'
     assert config.synthetic_mcs.formation_coupling == 'independent'
     assert config.synthetic_mcs.connectivity_policy == 'observe'
@@ -104,7 +110,7 @@ def test_canonical_experiment_uses_best_effort_half_meter_separation():
     config = load_experiment(example_path())
     assert config.target_dynamics.switch_period_sec == pytest.approx(20.0)
     assert config.safety.collision_policy == 'best_effort'
-    assert config.safety.preferred_separation_m == pytest.approx(0.5)
+    assert config.safety.preferred_separation_m == pytest.approx(0.4)
 
 
 def test_legacy_active_timeout_is_accepted_as_nonfatal_warning_alias(tmp_path):
@@ -158,12 +164,14 @@ def test_every_algorithm_uses_the_same_canonical_file(algorithm):
     assert config.configured_algorithm == 'heuristic'
     assert config.controller.algorithm == algorithm
     assert config.algorithm_source == 'cli'
-    assert config.safety.minimum_separation_m == pytest.approx(0.5)
-    expected = (
-        ControllerSchedule.RECEDING_HORIZON
-        if algorithm.startswith('mpc_')
-        else ControllerSchedule.FINAL_DESTINATION
-    )
+    assert config.safety.minimum_separation_m == pytest.approx(0.4)
+    expected = {
+        'heuristic': ControllerSchedule.FINAL_DESTINATION,
+        'heuristic_decentralized': ControllerSchedule.REACTIVE_PERIODIC,
+        'convex': ControllerSchedule.FINAL_DESTINATION,
+        'mpc_centralized': ControllerSchedule.RECEDING_HORIZON,
+        'mpc_distributed': ControllerSchedule.RECEDING_HORIZON,
+    }[algorithm]
     assert controller_schedule(config.controller.algorithm) is expected
 
 
@@ -200,6 +208,34 @@ def test_convex_rejects_stale_mpc_step_parameter(tmp_path):
     path.write_text(yaml.safe_dump(source), encoding='utf-8')
     with pytest.raises(ConfigError, match='mpc_max_step_m'):
         load_experiment(path, algorithm_override='convex')
+
+
+def test_decentralized_stability_defaults_and_validation(tmp_path):
+    source = yaml.safe_load(example_path().read_text(encoding='utf-8'))
+    source['targets_file'] = str(
+        Path(__file__).parents[1] / 'config' / 'targets.yaml'
+    )
+    block = source['controller']['algorithms']['heuristic_decentralized']
+    block.clear()
+    path = tmp_path / 'decentralized-defaults.yaml'
+    path.write_text(yaml.safe_dump(source), encoding='utf-8')
+    config = load_experiment(
+        path, algorithm_override='heuristic_decentralized'
+    )
+    assert config.controller.decentralized_waypoint_deadband_m == 0.05
+    assert config.controller.decentralized_ordering_hysteresis_m == 0.05
+
+    block['waypoint_deadband_m'] = -0.1
+    path.write_text(yaml.safe_dump(source), encoding='utf-8')
+    with pytest.raises(ConfigError, match='waypoint_deadband_m'):
+        load_experiment(path, algorithm_override='heuristic_decentralized')
+
+    block['waypoint_deadband_m'] = 0.05
+    source['communication']['maximum_range_m'] = 0.2
+    source['communication']['ideal_range_m'] = 0.2
+    path.write_text(yaml.safe_dump(source), encoding='utf-8')
+    with pytest.raises(ConfigError, match='exceed twice'):
+        load_experiment(path, algorithm_override='heuristic_decentralized')
 
 
 def test_missing_selected_parameter_and_unknown_top_level_rejected(tmp_path):

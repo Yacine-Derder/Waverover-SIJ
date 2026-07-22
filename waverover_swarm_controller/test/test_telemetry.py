@@ -27,6 +27,9 @@ def test_controller_telemetry_is_versioned_structured_and_canonical(
         selected_edges=(('station_0', 'robot_2'),),
         solver_status='optimal',
         solve_duration_sec=0.125,
+        controller_diagnostics={
+            'locally_computed_waypoints': setpoints,
+        },
     )
     payload = build_controller_telemetry(
         example_config,
@@ -42,7 +45,9 @@ def test_controller_telemetry_is_versioned_structured_and_canonical(
         {
             robot_id: {
                 'active_waypoint': setpoints[robot_id],
+                'active_requested_waypoint': setpoints[robot_id],
                 'pending_waypoint': None,
+                'pending_requested_waypoint': None,
                 'active_waypoint_age_sec': 12.0,
                 'last_publication_monotonic_sec': 50.0,
                 'last_publication_age_sec': 0.25,
@@ -50,6 +55,8 @@ def test_controller_telemetry_is_versioned_structured_and_canonical(
                 'active_waypoint_overdue': True,
                 'active_objective_revision': 4,
                 'pending_objective_revision': 5,
+                'active_command_revision': 7,
+                'superseded_token_count': 2,
             }
             for robot_id in snapshot.robots
         },
@@ -58,7 +65,8 @@ def test_controller_telemetry_is_versioned_structured_and_canonical(
     assert payload['configured_algorithm'] == 'heuristic'
     assert payload['effective_algorithm'] == example_config.controller.algorithm
 
-    assert payload['schema_version'] == 8
+    assert payload['schema_version'] == 9
+    assert payload['controller_schedule'] == 'final_destination_event_driven'
     assert payload['result_state'] == 'valid'
     assert payload['commands_enabled'] is False
     assert 'armed' not in payload
@@ -73,10 +81,15 @@ def test_controller_telemetry_is_versioned_structured_and_canonical(
     assert dispatch['active_waypoint_overdue']
     assert dispatch['active_objective_revision'] == 4
     assert dispatch['pending_objective_revision'] == 5
+    assert dispatch['active_command_revision'] == 7
+    assert dispatch['superseded_token_count'] == 2
     assert payload['optimized_setpoints']['robot_2'] == list(
         setpoints['robot_2']
     )
     assert payload['dispatched_waypoints']['robot_2'] == list(
+        setpoints['robot_2']
+    )
+    assert payload['locally_computed_waypoints']['robot_2'] == list(
         setpoints['robot_2']
     )
     assert payload['predicted_minimum_separation']['step'] == 0

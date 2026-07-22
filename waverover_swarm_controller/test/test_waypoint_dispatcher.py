@@ -173,3 +173,177 @@ def test_waypoint_failed_requires_exact_token_frame_and_coordinates(
     dispatcher.update_pending({'robot_2': action.point}, target_epoch=2)
     assert dispatcher.tick(snapshot, 1.3, True) == []
     assert dispatcher.states['robot_2'].failure_count == 1
+
+
+def test_reactive_batch_supersedes_active_with_new_tokens_and_ignores_old_ack(
+    example_config, snapshot
+):
+    dispatcher = WaypointDispatcher(
+        ('a', 'b'), example_config.waypoint_dispatch, example_config.safety
+    )
+    dispatcher.update_pending(
+        {'a': (0.0, 0.0), 'b': (1.0, 0.0)},
+        objective_revision=1, command_revision=1,
+        allow_supersession=True, waypoint_deadband_m=0.05,
+    )
+    first = dispatcher.tick(snapshot, 1.0, True)
+    old = {action.robot_id: action for action in first}
+    dispatcher.update_pending(
+        {'a': (0.5, 0.0), 'b': (1.5, 0.0)},
+        objective_revision=1, command_revision=2,
+        allow_supersession=True, waypoint_deadband_m=0.05,
+    )
+    replacements = dispatcher.tick(snapshot, 1.1, True)
+    new = {action.robot_id: action for action in replacements}
+
+    assert len(replacements) == 2
+    assert all(action.reason == 'reactive_supersession'
+               for action in replacements)
+    assert all(new[key].token != old[key].token for key in new)
+    assert dispatcher.acknowledge(
+        'a', 'robotics_lab', old['a'].token, old['a'].point,
+        1.2, 'robotics_lab',
+    ) == []
+    assert dispatcher.states['a'].active_token == new['a'].token
+    assert dispatcher.states['a'].superseded_acknowledgement_count == 1
+
+
+def test_reactive_deadband_retains_active_token_and_cancels_older_pending(
+    example_config, snapshot
+):
+    dispatcher = WaypointDispatcher(
+        ('a',), example_config.waypoint_dispatch, example_config.safety
+    )
+    dispatcher.update_pending(
+        {'a': (1.0, 0.0)}, objective_revision=1, command_revision=1,
+        allow_supersession=True, waypoint_deadband_m=0.05,
+    )
+    first = dispatcher.tick(snapshot, 1.0, True)[0]
+    dispatcher.update_pending(
+        {'a': (1.2, 0.0)}, objective_revision=1, command_revision=2,
+        allow_supersession=True, waypoint_deadband_m=0.05,
+    )
+    dispatcher.update_pending(
+        {'a': (1.01, 0.0)}, objective_revision=1, command_revision=3,
+        allow_supersession=True, waypoint_deadband_m=0.05,
+    )
+
+    assert dispatcher.tick(snapshot, 1.1, True) == []
+    state = dispatcher.states['a']
+    assert state.active_token == first.token
+    assert state.active_waypoint == first.point
+    assert state.pending_waypoint is None
+    assert state.retained_due_to_deadband
+    assert state.deadband_retention_count == 1
+
+
+def test_failed_reactive_replacement_batch_keeps_every_active_command(
+    example_config, snapshot
+):
+    dispatcher = WaypointDispatcher(
+        ('a', 'b'), example_config.waypoint_dispatch, example_config.safety
+    )
+    dispatcher.update_pending(
+        {'a': (0.0, 0.0), 'b': (1.0, 0.0)},
+        objective_revision=1, command_revision=1,
+        allow_supersession=True, waypoint_deadband_m=0.05,
+    )
+    first = dispatcher.tick(snapshot, 1.0, True)
+    old = {action.robot_id: action for action in first}
+    dispatcher.safety_config = replace(
+        example_config.safety,
+        geofence=replace(
+            example_config.safety.geofence,
+            x_min=0.0, x_max=0.1, y_min=0.0, y_max=0.1,
+        ),
+    )
+    dispatcher.update_pending(
+        {'a': (0.0, 0.0), 'b': (0.1, 0.1)},
+        objective_revision=1, command_revision=2,
+        allow_supersession=True, waypoint_deadband_m=0.0,
+    )
+
+    assert dispatcher.tick(snapshot, 1.1, True) == []
+    assert dispatcher.last_activation_failure.startswith(
+        'outgoing_waypoint_separation_failed'
+    )
+    assert {
+        key: dispatcher.states[key].active_token for key in ('a', 'b')
+    } == {key: old[key].token for key in ('a', 'b')}
+
+
+def test_reactive_repeat_after_endpoint_repair_retains_token(
+    example_config, snapshot
+):
+    dispatcher = WaypointDispatcher(
+        ('a', 'b'), example_config.waypoint_dispatch, example_config.safety
+    )
+    requested = {'a': (0.0, 0.0), 'b': (0.1, 0.0)}
+    dispatcher.update_pending(
+        requested, objective_revision=1, command_revision=1,
+        allow_supersession=True, waypoint_deadband_m=0.05,
+    )
+    first = dispatcher.tick(snapshot, 1.0, True)
+    tokens = {action.robot_id: action.token for action in first}
+    assert any(action.point != requested[action.robot_id] for action in first)
+
+    dispatcher.update_pending(
+        requested, objective_revision=1, command_revision=2,
+        allow_supersession=True, waypoint_deadband_m=0.05,
+    )
+    assert dispatcher.tick(snapshot, 1.1, True) == []
+    assert {
+        robot_id: state.active_token
+        for robot_id, state in dispatcher.states.items()
+    } == tokens
+
+
+def test_stale_reactive_revision_cannot_replace_or_refresh_newest(
+    example_config, snapshot
+):
+    dispatcher = WaypointDispatcher(
+        ('a',), replace(
+            example_config.waypoint_dispatch, refresh_period_sec=1.0
+        )
+    )
+    dispatcher.update_pending(
+        {'a': (1.0, 0.0)}, objective_revision=2, command_revision=5,
+        allow_supersession=True, waypoint_deadband_m=0.05,
+    )
+    newest = dispatcher.tick(snapshot, 1.0, True)[0]
+    dispatcher.update_pending(
+        {'a': (2.0, 0.0)}, objective_revision=2, command_revision=4,
+        allow_supersession=True, waypoint_deadband_m=0.05,
+    )
+
+    refresh = dispatcher.tick(snapshot, 2.0, True)
+    assert len(refresh) == 1
+    assert refresh[0].kind == 'refresh'
+    assert refresh[0].token == newest.token
+    assert refresh[0].point == newest.point
+
+
+def test_stop_clears_reactive_commands_and_superseded_cache(
+    example_config, snapshot
+):
+    dispatcher = WaypointDispatcher(
+        ('a',), example_config.waypoint_dispatch
+    )
+    dispatcher.update_pending(
+        {'a': (1.0, 0.0)}, command_revision=1,
+        allow_supersession=True, waypoint_deadband_m=0.05,
+    )
+    dispatcher.tick(snapshot, 1.0, True)
+    dispatcher.update_pending(
+        {'a': (2.0, 0.0)}, command_revision=2,
+        allow_supersession=True, waypoint_deadband_m=0.05,
+    )
+    dispatcher.tick(snapshot, 1.1, True)
+    assert dispatcher.states['a'].superseded_tokens
+
+    dispatcher.stop()
+    state = dispatcher.states['a']
+    assert state.active_waypoint is None
+    assert state.pending_waypoint is None
+    assert state.active_token is None
+    assert state.superseded_tokens == []

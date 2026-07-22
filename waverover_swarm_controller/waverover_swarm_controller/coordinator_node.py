@@ -90,6 +90,7 @@ class SwarmCoordinator(Node):
         self._objective_revision = 0
         self._last_compute_reason = 'not_computed'
         self._controller_compute_count = 0
+        self._reactive_compute_count = 0
 
         # The PC intentionally loads fleet naming without rover-local identity.
         from waverover.stack_config import (
@@ -275,6 +276,8 @@ class SwarmCoordinator(Node):
                 self, '_objective_revision', 0
             ) + 1
             return 'mission_objective_changed'
+        if schedule is ControllerSchedule.REACTIVE_PERIODIC:
+            return 'reactive_periodic'
         if schedule is ControllerSchedule.RECEDING_HORIZON:
             return 'periodic_mpc'
         return None
@@ -570,6 +573,15 @@ class SwarmCoordinator(Node):
                 self._controller_compute_count = getattr(
                     self, '_controller_compute_count', 0
                 ) + 1
+                if (
+                    hasattr(self, 'config')
+                    and controller_schedule(
+                        self.config.controller.algorithm
+                    ) is ControllerSchedule.REACTIVE_PERIODIC
+                ):
+                    self._reactive_compute_count = getattr(
+                        self, '_reactive_compute_count', 0
+                    ) + 1
                 outcome = self._compute_valid_result(snapshot)
         except (
             SafetyViolation,
@@ -613,16 +625,37 @@ class SwarmCoordinator(Node):
             and outcome.final_command_set_passed_validation
         ):
             if compute_reason is not None:
-                try:
-                    self.dispatcher.update_pending(
-                        result.setpoints,
-                        getattr(result, 'target_epoch', 0),
-                        objective_revision=getattr(
+                if not hasattr(self, 'config'):
+                    self.dispatcher.update_pending(result.setpoints)
+                else:
+                    schedule = controller_schedule(
+                        self.config.controller.algorithm
+                    )
+                    update_options = {
+                        'objective_revision': getattr(
                             self, '_objective_revision', 0
                         ),
-                    )
-                except TypeError:  # compatibility with narrow test adapters
-                    self.dispatcher.update_pending(result.setpoints)
+                    }
+                    if schedule is ControllerSchedule.REACTIVE_PERIODIC:
+                        update_options.update({
+                            'command_revision': getattr(
+                                self, '_controller_compute_count', 0
+                            ),
+                            'allow_supersession': True,
+                            'waypoint_deadband_m': (
+                                self.config.controller.
+                                decentralized_waypoint_deadband_m
+                            ),
+                        })
+                    try:
+                        self.dispatcher.update_pending(
+                            result.setpoints,
+                            getattr(result, 'target_epoch', 0),
+                            **update_options,
+                        )
+                    except TypeError:
+                        # Compatibility with narrow integration-test adapters.
+                        self.dispatcher.update_pending(result.setpoints)
             self._dispatch(snapshot)
             activation_failure = getattr(
                 self.dispatcher, 'last_activation_failure', ''
@@ -781,6 +814,11 @@ class SwarmCoordinator(Node):
                 self.end_trial_publishers[robot_id].publish(Empty())
             self._end_sent_for_stop = True
         self.dispatcher.stop()
+        reset_controller = getattr(
+            getattr(self, 'controller', None), 'reset', None
+        )
+        if reset_controller is not None:
+            reset_controller()
         self.get_logger().error('Swarm trial stopped: %s' % reason)
 
     def cleanup(self):
@@ -850,6 +888,12 @@ class SwarmCoordinator(Node):
             'controller_compute_count': getattr(
                 self, '_controller_compute_count', 0
             ),
+            'reactive_compute_count': getattr(
+                self, '_reactive_compute_count', 0
+            ),
+            'controller_schedule': controller_schedule(
+                self.config.controller.algorithm
+            ).value,
         }
         for robot_id, age in ages.items():
             values['pose_age_' + robot_id] = (
@@ -876,6 +920,15 @@ class SwarmCoordinator(Node):
                 'pending_target_epoch',
                 'active_objective_revision',
                 'pending_objective_revision',
+                'active_command_revision',
+                'pending_command_revision',
+                'pending_supersede',
+                'retained_due_to_deadband',
+                'deadband_retention_count',
+                'superseded_token_count',
+                'superseded_acknowledgement_count',
+                'last_superseded_token',
+                'last_superseded_by_token',
             ):
                 values[field + '_' + robot_id] = str(dispatch[field])
             health = getattr(self, 'onboard_health', {}).get(robot_id)
@@ -987,6 +1040,9 @@ class SwarmCoordinator(Node):
                 objective_revision=getattr(self, '_objective_revision', 0),
                 controller_compute_count=getattr(
                     self, '_controller_compute_count', 0
+                ),
+                reactive_compute_count=getattr(
+                    self, '_reactive_compute_count', 0
                 ),
                 activation_repair=(
                     asdict(self.dispatcher.last_activation_report)

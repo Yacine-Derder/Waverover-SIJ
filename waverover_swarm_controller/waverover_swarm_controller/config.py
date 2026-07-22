@@ -50,6 +50,8 @@ class ControllerConfig:
     distributed_update_semantics: str
     distributed_inter_agent_weight: float = 2.0
     connectivity_recovery_slack_penalty: float = 10000.0
+    decentralized_waypoint_deadband_m: float = 0.05
+    decentralized_ordering_hysteresis_m: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -247,6 +249,11 @@ ALGORITHM_PARAMETERS = {
         'connectivity_recovery_slack_penalty',
     },
 }
+OPTIONAL_ALGORITHM_PARAMETERS = {
+    'heuristic_decentralized': {
+        'waypoint_deadband_m', 'ordering_hysteresis_m',
+    },
+}
 
 
 def _controller_selection(raw, algorithm_override):
@@ -277,7 +284,9 @@ def _controller_selection(raw, algorithm_override):
                 algorithms[name], 'controller.algorithms.%s' % name
             )
             _reject_unknown(
-                block, ALGORITHM_PARAMETERS[name],
+                block,
+                ALGORITHM_PARAMETERS[name]
+                | OPTIONAL_ALGORITHM_PARAMETERS.get(name, set()),
                 'controller.algorithms.%s' % name
             )
             missing_parameters = sorted(ALGORITHM_PARAMETERS[name] - set(block))
@@ -696,6 +705,14 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
             'turn radius %.6f m, inconsistent with turn_radius_m %.6f m.'
             % (implied_radius, vehicle.turn_radius_m)
         )
+    if (
+        algorithm == 'heuristic_decentralized'
+        and maximum_range - 2.0 * vehicle.turn_radius_m <= 0.0
+    ):
+        raise ConfigError(
+            'heuristic_decentralized requires communication.maximum_range_m '
+            'to exceed twice vehicle.turn_radius_m.'
+        )
 
     return ExperimentConfig(
         frame_id='robotics_lab',
@@ -751,6 +768,14 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
                 ),
                 'controller.connectivity_recovery_slack_penalty',
                 positive=True,
+            ),
+            decentralized_waypoint_deadband_m=_finite(
+                controller_data.get('waypoint_deadband_m', 0.05),
+                'controller.waypoint_deadband_m', nonnegative=True,
+            ),
+            decentralized_ordering_hysteresis_m=_finite(
+                controller_data.get('ordering_hysteresis_m', 0.05),
+                'controller.ordering_hysteresis_m', nonnegative=True,
             ),
         ),
         waypoint_dispatch=DispatchConfig(

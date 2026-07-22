@@ -18,12 +18,13 @@ class ControllerSchedule(Enum):
     """Authoritative controller output meaning and recomputation policy."""
 
     FINAL_DESTINATION = 'final_destination_event_driven'
+    REACTIVE_PERIODIC = 'reactive_periodic'
     RECEDING_HORIZON = 'receding_horizon_periodic'
 
 
 CONTROLLER_SCHEDULES = {
     'heuristic': ControllerSchedule.FINAL_DESTINATION,
-    'heuristic_decentralized': ControllerSchedule.FINAL_DESTINATION,
+    'heuristic_decentralized': ControllerSchedule.REACTIVE_PERIODIC,
     'convex': ControllerSchedule.FINAL_DESTINATION,
     'mpc_centralized': ControllerSchedule.RECEDING_HORIZON,
     'mpc_distributed': ControllerSchedule.RECEDING_HORIZON,

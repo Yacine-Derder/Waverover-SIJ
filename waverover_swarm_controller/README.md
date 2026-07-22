@@ -1,7 +1,7 @@
 # WaveRover swarm controller (operator PC only)
 
 The default target switch period is 20 seconds. Every newly activated command
-set must have endpoint separation of at least 0.5 m. A deterministic,
+set must satisfy the configured endpoint separation. A deterministic,
 geofence-bounded endpoint correction is attempted at activation; if that
 cannot satisfy the limit, none of the conflicting new commands is published.
 This is a waypoint-endpoint guarantee, not continuous path collision
@@ -56,9 +56,13 @@ Five controllers were ported from `Yacine-Derder/drone-simulator-master`:
 
 - `heuristic`: current-priority relay chain, deterministic background clustering,
   required-relay calculation, and Hungarian robot/position assignment.
-- `heuristic_decentralized`: PC-hosted target-aware agents with a distinct
-  per-agent computation boundary and local relay-chain decisions. It does not
-  add ROS traffic between agents yet.
+- `heuristic_decentralized`: the simulator/report hybrid heuristic. The PC uses
+  global target/station data to cluster targets directionally, reduce the
+  number of lines to the available relay budget, prioritize the main target,
+  and persistently assign rovers to lines. Each rover waypoint is then updated
+  from a strict local view containing only its own pose and observable,
+  in-range, same-line neighbors. It does not add ROS traffic between agents;
+  the PC enforces that decentralized information boundary in software.
 - `convex`: centralized static target assignment and final-position
   optimization. Its output is the final solution, with no MPC horizon or
   per-cycle movement bound.
@@ -88,7 +92,7 @@ Controller output and scheduling have one authoritative classification:
 | Controller | Output | Computation schedule |
 | --- | --- | --- |
 | `heuristic` | final destinations | startup and mission-objective change |
-| `heuristic_decentralized` | final destinations | startup and mission-objective change |
+| `heuristic_decentralized` | reactive local relay waypoint | every control period |
 | `convex` | static optimized final destinations | startup and mission-objective change |
 | `mpc_centralized` | first future MPC step | every control period |
 | `mpc_distributed` | first future MPC step | every control period |
@@ -96,9 +100,36 @@ Controller output and scheduling have one authoritative classification:
 The semantic objective identity includes station ID/position, priority target
 selection, and sorted target IDs, positions, weights, and priority flags. Pose
 and timestamp changes and mapping order are deliberately excluded. Therefore
-the three static controllers retain one final destination set while rovers
-move; a genuine objective change creates exactly one new revision. MPC retains
-periodic replanning at `controller.common.control_period_sec`.
+the two final-destination controllers retain one solution while rovers move; a
+genuine objective change creates exactly one new revision. Decentralized local
+formation and MPC both run at `controller.common.control_period_sec`, reported
+respectively as `reactive_periodic` and `periodic_mpc`.
+
+The decentralized relay demand for a target line is
+`int(distance / safe_link_distance) + 1`, where `safe_link_distance` is
+`maximum_range_m - 2 * turn_radius_m` (1.2 m with the canonical vehicle and
+communication values). If all candidate directional clusters do not fit, the
+cluster count is reduced before assignment; this avoids the former one-rover-
+per-target round robin. The main/highest-priority target remains the
+representative of its cluster. Assignments persist while their cluster remains
+valid and all ties use robot IDs.
+
+For every reactive update, a rover orders only its local same-line neighbors
+by station-to-target projection, chooses the closest predecessor toward the
+station and successor toward the target, then uses the simulator midpoint or
+terminal-target rule. Its waypoint is capped successively from its predecessor
+by the safe link distance, so repeated updates grow a station → relay → relay
+→ target chain rather than capping every rover independently at the station.
+The previous cycle's waypoints provide immutable Jacobi inputs. Configurable
+projection hysteresis stabilizes ordering.
+
+The deterministic one-target comparison test starts three rovers at 0.1,
+0.2, and 0.3 m on a 3.5 m line. After 30 reactive updates its order is
+`a=1.166462`, `b=2.333231`, `c=3.500000` m; consecutive station/relay links
+are 1.166462, 1.166769, and 1.166769 m, all below the 1.2 m safe distance, and
+the terminal-to-target distance is zero. The centralized heuristic reference
+is 1.166667, 2.333333, and 3.500000 m. This comparison intentionally tests
+progressive qualitative convergence, not immediate numerical equality.
 
 The three optimization controllers use a never-fail hierarchy: normal solve,
 connectivity-slack recovery solve, deterministic connectivity recovery, then
@@ -141,8 +172,9 @@ states are outside that rule. Horizon-wide pairwise separation constraints
 that belonged to the former generic collision feature were removed from both
 MPC formulations; communication/connectivity constraints and model dynamics
 remain. Predicted paths are still published as unmodified solver diagnostics.
-If activation correction changes the optimized first step, telemetry records
-both `optimized_setpoints` and `dispatched_waypoints` plus the repair report.
+If activation correction changes a controller endpoint, telemetry records the
+locally computed/optimized request and `dispatched_waypoints` plus the repair
+report.
 Neither endpoint separation nor discrete predictions establish continuous-time
 physical collision avoidance.
 
@@ -156,8 +188,15 @@ divide by zero; zero-adjacency Fiedler selection returns no edges rather than
 NaNs; missing neighbors and removed string robot IDs are handled explicitly;
 solver failures never fall back to another algorithm; and unused `cvxpygen`
 code generation was removed. Deterministic string IDs replace simulator class
-counters and all iteration order is canonical. The decentralized implementation
-retains local chain behavior but removes simulator display/color/battery state.
+counters and all iteration order is canonical. For ground rovers, decentralized
+ordering uses line projection with configurable hysteresis instead of the
+simulator's fixed-wing heading/turn-radius "earlobe": MCS yaw does not have the
+same flight-path meaning. The port also removes simulator display/color/battery
+state and runs the local-agent calculations on the operator PC. Rather than
+depending on simulator object iteration and incremental station discovery, the
+PC atomically reserves each cluster's calculated relay demand, preferring
+station-visible rovers and then deterministic station proximity. Assignments
+are released when a rebuilt cluster needs fewer relays or disappears.
 The fixed station/GCS remains a communication-graph node but is excluded from
 rover-assignable relay positions. Surplus centralized-heuristic rovers hold
 their measured position instead of receiving the former station-position
@@ -197,6 +236,14 @@ contains shared timing and seed values, while `controller.algorithms` contains
 validated blocks for `heuristic`, `heuristic_decentralized`, `convex`,
 `mpc_centralized`, and `mpc_distributed`. Unknown keys and missing selected
 algorithm parameters are errors.
+
+`heuristic_decentralized.waypoint_deadband_m` defaults to 0.05 m and prevents
+an equivalent reactive result from replacing an active token.
+`heuristic_decentralized.ordering_hysteresis_m` defaults to 0.05 m and retains
+a previous predecessor/successor through small projection ties. Both values
+must be nonnegative. Its update period inherits the common control period. The
+configuration is rejected when `maximum_range_m - 2 * turn_radius_m` is not
+positive.
 
 `config/targets.yaml` is an installed editable example:
 
@@ -704,6 +751,13 @@ binary and weighted connectivity, pose ages/skew, stop reason, and latest
 handoff. Telemetry publication is observability-only: an exception while
 publishing it cannot validate a controller result or enable commands.
 
+For the decentralized controller it additionally records schedule/reactive
+counts, cluster and assignment revisions, per-rover local neighbors,
+predecessor/successor and connectivity correction, locally requested
+waypoints, dispatched endpoints, deadband retention, command revisions, and
+superseded old/new token relationships. This keeps recording and replay able
+to distinguish local formation output from activation-time endpoint repair.
+
 ## Offline analysis and comparisons
 
 Analyze a run without `ros2 topic echo`:
@@ -777,9 +831,15 @@ each rover; a stale revision cannot replace or later promote over a newer one.
 A point is published when no active waypoint exists or after an exact onboard
 frame/token/coordinate acknowledgement clears the active point. Promotion is
 revalidated against the prospective active endpoint set, so acknowledgement
-callbacks cannot bypass separation. The existing policy waits for that
-acknowledgement and does not preempt an active rover command on objective
-change.
+callbacks cannot bypass separation. Final-destination and MPC policy waits for
+that acknowledgement and does not preempt an active rover command on objective
+change. A materially changed `REACTIVE_PERIODIC` waypoint is the narrow
+exception: the entire replacement batch is validated against the prospective
+active endpoint map, each accepted replacement receives a new token, and the
+old token enters a bounded superseded cache. A delayed acknowledgement for the
+old token is counted but cannot clear or alter the replacement. A request
+within the decentralized deadband retains the active token. Only the newest
+reactive command revision can be activated or refreshed.
 
 The active point is republished unchanged every `refresh_period_sec`, using
 the identical coordinates and token. Refresh does not invoke a controller,

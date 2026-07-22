@@ -25,8 +25,12 @@ class _SchedulingDispatcher:
     def __init__(self):
         self.updates = []
 
-    def update_pending(self, points, target_epoch=0, objective_revision=0):
-        self.updates.append((dict(points), target_epoch, objective_revision))
+    def update_pending(
+        self, points, target_epoch=0, objective_revision=0, **options
+    ):
+        self.updates.append(
+            (dict(points), target_epoch, objective_revision, options)
+        )
 
 
 def _result(snapshot):
@@ -77,7 +81,7 @@ def _coordinator(config, snapshots):
 
 
 @pytest.mark.parametrize(
-    'algorithm', ['heuristic', 'heuristic_decentralized', 'convex']
+    'algorithm', ['heuristic', 'convex']
 )
 def test_final_destination_controllers_ignore_pose_only_changes(
     algorithm, example_config, snapshot
@@ -112,6 +116,34 @@ def test_final_destination_controllers_ignore_pose_only_changes(
     assert len(dispatcher.updates) == 2
     assert coordinator._last_compute_reason == 'mission_objective_changed'
     assert dispatcher.updates[-1][2] == 2
+
+
+def test_decentralized_heuristic_recomputes_reactively(
+    example_config, snapshot
+):
+    config = replace(
+        example_config,
+        controller=replace(
+            example_config.controller, algorithm='heuristic_decentralized'
+        ),
+    )
+    moved = replace(
+        snapshot,
+        robots={
+            robot_id: replace(state, x=state.x + 0.1)
+            for robot_id, state in snapshot.robots.items()
+        },
+    )
+    coordinator, calls, dispatcher = _coordinator(
+        config, iter((snapshot, moved, moved))
+    )
+    for _index in range(3):
+        SwarmCoordinator._control_cycle(coordinator)
+    assert len(calls) == 3
+    assert len(dispatcher.updates) == 3
+    assert coordinator._last_compute_reason == 'reactive_periodic'
+    assert dispatcher.updates[-1][3]['allow_supersession']
+    assert dispatcher.updates[-1][3]['command_revision'] == 3
 
 
 def test_semantic_target_changes_trigger_once_and_order_does_not(
@@ -205,14 +237,17 @@ def test_initial_outgoing_batch_is_endpoint_corrected_and_pose_independent(
         actions = dispatcher.tick(snapshot, 1.0, True)
         points = {action.robot_id: action.point for action in actions}
         assert len(actions) == 2
-        assert math.dist(points['a'], points['b']) >= 0.5 - 1e-9
+        assert math.dist(points['a'], points['b']) >= (
+            example_config.safety.minimum_separation_m - 1e-9
+        )
         outputs.append(points)
     assert outputs[0] == outputs[1]
 
 
 def test_endpoints_at_exact_minimum_separation_are_unchanged(example_config):
     dispatcher = _dispatcher(example_config)
-    outgoing = {'a': (1.0, 1.0), 'b': (1.5, 1.0)}
+    separation = example_config.safety.minimum_separation_m
+    outgoing = {'a': (1.0, 1.0), 'b': (1.0 + separation, 1.0)}
     dispatcher.update_pending(outgoing, objective_revision=1)
     actions = dispatcher.tick(_snapshot_at(a=(3, 3), b=(-3, -3)), 1.0, True)
     assert {action.robot_id: action.point for action in actions} == outgoing
@@ -255,7 +290,9 @@ def test_partial_handoff_fixes_active_and_revalidates_ack_promotion(
     )
     assert dispatcher.states['b'].active_waypoint == (1.0, 0.0)
     assert len(actions) == 1
-    assert math.dist(actions[0].point, (1.0, 0.0)) >= 0.5 - 1e-9
+    assert math.dist(actions[0].point, (1.0, 0.0)) >= (
+        example_config.safety.minimum_separation_m - 1e-9
+    )
 
 
 def test_impossible_outgoing_batch_publishes_none(example_config):

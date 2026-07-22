@@ -14,7 +14,7 @@ from waverover_swarm_controller.synthetic_mcs import (
 
 
 def smoke_config():
-    path = Path(__file__).parents[1] / 'config' / 'smoke_test_6.yaml'
+    path = Path(__file__).parents[1] / 'config' / 'experiment.yaml'
     return load_experiment(path)
 
 
@@ -57,12 +57,12 @@ def test_invalid_numeric_parameters_are_rejected(values):
 def test_valid_six_rover_formation_reports_metrics():
     config = smoke_config()
     positions = generate_formation(
-        config.robot_ids, config.station.position, 0.5
+        config.robot_ids, config.station.position, 1.0
     )
 
     validation = validate_formation(config, positions)
 
-    assert validation.minimum_separation_m == pytest.approx(0.5)
+    assert validation.minimum_separation_m == pytest.approx(1.0)
     assert validation.algebraic_connectivity > 0.0
 
 
@@ -79,7 +79,7 @@ def test_formation_below_minimum_separation_is_rejected():
 def test_formation_outside_geofence_is_rejected():
     config = smoke_config()
     positions = dict(generate_formation(
-        config.robot_ids, config.station.position, 0.5
+        config.robot_ids, config.station.position, 1.0
     ))
     positions['131'] = (10.0, 0.0)
 
@@ -94,6 +94,9 @@ def test_disconnected_formation_is_rejected():
         config,
         communication=replace(config.communication, maximum_range_m=0.4),
         safety=replace(config.safety, geofence=wide_geofence),
+        synthetic_mcs=replace(
+            config.synthetic_mcs, connectivity_policy='enforce'
+        ),
     )
     positions = generate_formation(
         config.robot_ids, config.station.position, 1.0

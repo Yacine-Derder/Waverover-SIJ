@@ -15,7 +15,7 @@ from waverover_swarm_controller.target_visualizer import (
 
 def config_paths():
     config = Path(__file__).parents[1] / 'config'
-    return config / 'targets_smoke_6.yaml', config / 'smoke_test_6.yaml'
+    return config / 'targets_smoke_6.yaml', config / 'experiment.yaml'
 
 
 def test_figure_has_targets_labels_and_experiment_context():

@@ -33,13 +33,12 @@ from waverover_swarm_controller.synthetic_motion import SyntheticTrajectory
 
 
 def _smoke_config(algorithm, semantics='jacobi'):
-    path = Path(__file__).parents[1] / 'config' / 'smoke_test_6.yaml'
-    config = load_experiment(path)
+    path = Path(__file__).parents[1] / 'config' / 'experiment.yaml'
+    config = load_experiment(path, algorithm_override=algorithm)
     return replace(
         config,
         controller=replace(
             config.controller,
-            algorithm=algorithm,
             distributed_update_semantics=semantics,
         ),
     )
@@ -48,7 +47,7 @@ def _smoke_config(algorithm, semantics='jacobi'):
 def _converging_snapshot(config):
     now = time.monotonic()
     positions = generate_formation(
-        config.robot_ids, config.station.position, radius_m=0.5
+        config.robot_ids, config.station.position, radius_m=1.0
     )
     target = TargetState('common_target', 2.5, 0.0, 10.0, is_main=True)
     return SwarmSnapshot(
@@ -283,16 +282,16 @@ def test_distributed_previous_prediction_translates_to_new_measured_pose():
 
 
 def test_distributed_mpc_remains_feasible_as_rigid_formation_moves():
-    dynamic_config = load_experiment(
-        Path(__file__).parents[1] / 'config' / 'dynamic_smoke_test_6.yaml'
+    motion_config = load_experiment(
+        Path(__file__).parents[1] / 'config' / 'experiment.yaml'
     )
     config = replace(
-        dynamic_config,
+        motion_config,
         controller=replace(
-            dynamic_config.controller, algorithm='mpc_distributed'
+            motion_config.controller, algorithm='mpc_distributed'
         ),
         synthetic_mcs=replace(
-            dynamic_config.synthetic_mcs,
+            motion_config.synthetic_mcs,
             formation_coupling='rigid',
             connectivity_policy='enforce',
         ),

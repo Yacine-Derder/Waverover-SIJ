@@ -45,13 +45,13 @@ class SwarmCoordinator(Node):
     def __init__(self):
         super().__init__('waverover_swarm_controller')
         config_file = str(self.declare_parameter('config_file', '').value).strip()
-        algorithm = str(self.declare_parameter('algorithm', 'heuristic').value)
+        algorithm = str(self.declare_parameter('algorithm', '').value).strip()
         dry_run = bool(self.declare_parameter('dry_run', True).value)
         if not config_file:
             raise ConfigError('config_file is required.')
         self.config = load_experiment(
             config_file,
-            algorithm_override=algorithm,
+            algorithm_override=algorithm or None,
             dry_run_override=dry_run,
         )
         self.controller = controller_from_config(self.config)
@@ -235,6 +235,9 @@ class SwarmCoordinator(Node):
 
     def _finish_outcome(self, result, dispatch_allowed, complete, validated,
                         mode, failures):
+        # Keep outcome reporting best-effort: it must never replace the
+        # controller failure which led us into recovery or safe hold.
+        failures = dict(failures)
         counters = dict(getattr(self, 'fallback_counters', {}))
         if mode.startswith('normal_') or mode in (
             'heuristic', 'heuristic_decentralized'
@@ -246,6 +249,33 @@ class SwarmCoordinator(Node):
             consecutive = getattr(self, 'consecutive_recovery_cycles', 0) + 1
         self.consecutive_recovery_cycles = consecutive
         self.fallback_counters = counters
+        previous = getattr(self, '_last_controller_mode', None)
+        if previous != mode:
+            try:
+                logger = (
+                    self.get_logger() if hasattr(self, 'get_logger') else None
+                )
+            except Exception as error:
+                logger = None
+                failures['outcome_reporting_error'] = (
+                    SwarmCoordinator._failure(error)
+                )
+            if logger is not None:
+                message = 'Controller mode transition: %s -> %s' % (
+                    previous or 'startup', mode
+                )
+                try:
+                    # ROS 2 Jazzy binds severity to a Python logging call site.
+                    # These must remain distinct, static invocation lines.
+                    if mode.startswith('normal_'):
+                        logger.info(message)
+                    else:
+                        logger.warning(message)
+                except Exception as error:
+                    failures['outcome_reporting_error'] = (
+                        SwarmCoordinator._failure(error)
+                    )
+            self._last_controller_mode = mode
         outcome = ControllerExecutionOutcome(
             result=result,
             dispatch_allowed=dispatch_allowed,
@@ -256,21 +286,6 @@ class SwarmCoordinator(Node):
             consecutive_recovery_cycles=consecutive,
             fallback_counters=counters,
         )
-        previous = getattr(self, '_last_controller_mode', None)
-        if previous != mode:
-            logger = self.get_logger() if hasattr(self, 'get_logger') else None
-            if logger is not None:
-                message = 'Controller mode transition: %s -> %s' % (
-                    previous or 'startup', mode
-                )
-                log_method = getattr(
-                    logger,
-                    'info' if mode.startswith('normal_') else 'warn',
-                    None,
-                )
-                if log_method is not None:
-                    log_method(message)
-            self._last_controller_mode = mode
         self.latest_execution_outcome = outcome
         return outcome
 

@@ -165,12 +165,143 @@ class ExperimentConfig:
     analysis: AnalysisConfig
     source_path: Path
     targets_path: Path
+    configured_algorithm: str
+    algorithm_source: str
 
 
 def _mapping(value, name):
     if not isinstance(value, dict):
         raise ConfigError('%s must be a mapping.' % name)
     return value
+
+
+def _reject_unknown(mapping, allowed, name):
+    unknown = sorted(set(mapping) - set(allowed))
+    if unknown:
+        raise ConfigError(
+            '%s contains unknown parameter(s): %s.'
+            % (name, ', '.join(unknown))
+        )
+
+
+TOP_LEVEL_PARAMETERS = {
+    'frame_id', 'robot_ids', 'pose', 'station', 'targets_file',
+    'target_dynamics', 'vehicle', 'controller', 'waypoint_dispatch',
+    'communication', 'safety', 'synthetic_mcs', 'recording', 'analysis',
+}
+SECTION_PARAMETERS = {
+    'pose': {'timeout_sec', 'maximum_snapshot_skew_sec'},
+    'station': {'id', 'position'},
+    'target_dynamics': {
+        'mode', 'switch_period_sec', 'priority_weight', 'background_weight',
+        'seed', 'initial_priority_target_id', 'avoid_immediate_repeat',
+    },
+    'vehicle': {
+        'straight_speed_mps', 'turn_radius_m', 'bank_yaw_rate_rad_s',
+        'turning_path_speed_mps',
+    },
+    'waypoint_dispatch': {
+        'refresh_period_sec', 'active_waypoint_warning_sec',
+        'repeated_destination_epsilon_m',
+        'completed_destination_reissue_distance_m', 'reached_distance_m',
+        'handoff_delay_sec', 'maximum_active_time_sec',
+    },
+    'communication': {'ideal_range_m', 'maximum_range_m'},
+    'safety': {
+        'dry_run', 'preferred_separation_m', 'minimum_separation_m',
+        'collision_policy', 'collision_repair_max_iterations',
+        'controller_result_timeout_sec', 'geofence',
+    },
+    'safety.geofence': {'x_min', 'x_max', 'y_min', 'y_max'},
+    'synthetic_mcs': {
+        'mode', 'preset', 'seed', 'duration_sec', 'formation_coupling',
+        'initial_radius_m', 'connectivity_policy',
+        'segment_duration_min_sec', 'segment_duration_max_sec',
+        'process_speed_std_mps', 'process_yaw_rate_std_rad_s',
+        'measurement_position_std_m', 'measurement_heading_std_rad',
+        'maximum_transition_attempts', 'script',
+    },
+    'recording': {
+        'root_directory', 'profile', 'storage_id', 'pose_source',
+        'start_synthetic',
+    },
+    'analysis': {'connectivity_alpha', 'maximum_interpolation_gap_sec'},
+}
+LEGACY_CONTROLLER_PARAMETERS = {
+    'algorithm', 'control_period_sec', 'mpc_horizon', 'mpc_max_step_m',
+    'minimum_mpc_lookahead_m', 'deterministic_seed',
+    'distributed_update_semantics', 'distributed_inter_agent_weight',
+    'connectivity_recovery_slack_penalty',
+}
+ALGORITHM_PARAMETERS = {
+    'heuristic': set(),
+    'heuristic_decentralized': set(),
+    'convex': {'mpc_max_step_m', 'connectivity_recovery_slack_penalty'},
+    'mpc_centralized': {
+        'mpc_horizon', 'mpc_max_step_m', 'minimum_mpc_lookahead_m',
+        'connectivity_recovery_slack_penalty',
+    },
+    'mpc_distributed': {
+        'mpc_horizon', 'mpc_max_step_m', 'minimum_mpc_lookahead_m',
+        'distributed_update_semantics', 'distributed_inter_agent_weight',
+        'connectivity_recovery_slack_penalty',
+    },
+}
+
+
+def _controller_selection(raw, algorithm_override):
+    """Validate and resolve the unified controller configuration."""
+    if 'common' not in raw and 'algorithms' not in raw:
+        _reject_unknown(raw, LEGACY_CONTROLLER_PARAMETERS, 'controller')
+        configured = str(raw.get('algorithm', '')).strip().lower()
+        selected = dict(raw)
+    else:
+        _reject_unknown(raw, {'algorithm', 'common', 'algorithms'}, 'controller')
+        common = _mapping(raw.get('common'), 'controller.common')
+        _reject_unknown(
+            common, {'control_period_sec', 'deterministic_seed'},
+            'controller.common'
+        )
+        algorithms = _mapping(raw.get('algorithms'), 'controller.algorithms')
+        _reject_unknown(
+            algorithms, SUPPORTED_ALGORITHMS, 'controller.algorithms'
+        )
+        missing = sorted(set(SUPPORTED_ALGORITHMS) - set(algorithms))
+        if missing:
+            raise ConfigError(
+                'controller.algorithms is missing supported block(s): %s.'
+                % ', '.join(missing)
+            )
+        for name in SUPPORTED_ALGORITHMS:
+            block = _mapping(
+                algorithms[name], 'controller.algorithms.%s' % name
+            )
+            _reject_unknown(
+                block, ALGORITHM_PARAMETERS[name],
+                'controller.algorithms.%s' % name
+            )
+            missing_parameters = sorted(ALGORITHM_PARAMETERS[name] - set(block))
+            if missing_parameters:
+                raise ConfigError(
+                    'controller.algorithms.%s is missing required parameter(s): %s.'
+                    % (name, ', '.join(missing_parameters))
+                )
+        configured = str(raw.get('algorithm', '')).strip().lower()
+        selected = dict(common)
+        if configured in algorithms:
+            effective_name = str(
+                algorithm_override or configured
+            ).strip().lower()
+            if effective_name in algorithms:
+                selected.update(algorithms[effective_name])
+    effective = str(algorithm_override or configured).strip().lower()
+    for name, value in (('configured', configured), ('effective', effective)):
+        if value not in SUPPORTED_ALGORITHMS:
+            raise ConfigError(
+                '%s controller.algorithm must be one of: %s.'
+                % (name, ', '.join(SUPPORTED_ALGORITHMS))
+            )
+    return configured, effective, selected
 
 
 def _finite(value, name, *, positive=False, nonnegative=False):
@@ -271,6 +402,7 @@ def load_targets(path, geofence):
 def load_experiment(path, algorithm_override=None, dry_run_override=None):
     source_path = Path(path).expanduser().resolve()
     data = _read_yaml(source_path, 'experiment configuration')
+    _reject_unknown(data, TOP_LEVEL_PARAMETERS, 'experiment configuration')
     if data.get('frame_id') != 'robotics_lab':
         raise ConfigError('frame_id must be robotics_lab.')
 
@@ -285,13 +417,18 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
 
     pose_data = _mapping(data.get('pose'), 'pose')
     station_data = _mapping(data.get('station'), 'station')
+    _reject_unknown(pose_data, SECTION_PARAMETERS['pose'], 'pose')
+    _reject_unknown(station_data, SECTION_PARAMETERS['station'], 'station')
     station_id = str(station_data.get('id', '')).strip()
     if not station_id:
         raise ConfigError('station.id must be nonempty.')
     station_position = _point(station_data.get('position'), 'station.position')
 
     vehicle_data = _mapping(data.get('vehicle'), 'vehicle')
-    controller_data = _mapping(data.get('controller'), 'controller')
+    raw_controller_data = _mapping(data.get('controller'), 'controller')
+    configured_algorithm, algorithm, controller_data = _controller_selection(
+        raw_controller_data, algorithm_override
+    )
     dispatch_data = _mapping(data.get('waypoint_dispatch'), 'waypoint_dispatch')
     deprecated_dispatch = {
         'reached_distance_m', 'handoff_delay_sec'
@@ -309,6 +446,22 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
     recording_data = _mapping(data.get('recording', {}), 'recording')
     analysis_data = _mapping(data.get('analysis', {}), 'analysis')
     geofence_data = _mapping(safety_data.get('geofence'), 'safety.geofence')
+    for section_name, section_data in (
+        ('vehicle', vehicle_data),
+        ('waypoint_dispatch', dispatch_data),
+        ('communication', communication_data),
+        ('safety', safety_data),
+        ('synthetic_mcs', synthetic_data),
+        ('recording', recording_data),
+        ('analysis', analysis_data),
+    ):
+        _reject_unknown(
+            section_data, SECTION_PARAMETERS[section_name], section_name
+        )
+    _reject_unknown(
+        geofence_data, SECTION_PARAMETERS['safety.geofence'],
+        'safety.geofence'
+    )
     geofence = GeofenceConfig(
         x_min=_finite(geofence_data.get('x_min'), 'safety.geofence.x_min'),
         x_max=_finite(geofence_data.get('x_max'), 'safety.geofence.x_max'),
@@ -320,14 +473,6 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
     if not geofence.contains(station_position):
         raise ConfigError('Station falls outside the configured geofence.')
 
-    algorithm = str(
-        algorithm_override or controller_data.get('algorithm', '')
-    ).strip().lower()
-    if algorithm not in SUPPORTED_ALGORITHMS:
-        raise ConfigError(
-            'controller.algorithm must be one of: %s.'
-            % ', '.join(SUPPORTED_ALGORITHMS)
-        )
     semantics = str(controller_data.get(
         'distributed_update_semantics', 'jacobi'
     )).strip().lower()
@@ -336,7 +481,7 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
             'distributed_update_semantics must be jacobi or gauss_seidel.'
         )
     try:
-        horizon = int(controller_data.get('mpc_horizon'))
+        horizon = int(controller_data.get('mpc_horizon', 5))
         controller_seed = int(controller_data.get('deterministic_seed', 42))
     except (TypeError, ValueError) as error:
         raise ConfigError('mpc_horizon and deterministic_seed must be integers.') from error
@@ -354,7 +499,7 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
     if collision_policy != 'best_effort':
         raise ConfigError('safety.collision_policy must be best_effort.')
     preferred_separation = safety_data.get(
-        'preferred_separation_m', safety_data.get('minimum_separation_m', 0.35)
+        'preferred_separation_m', safety_data.get('minimum_separation_m', 0.5)
     )
 
     synthetic_mode = str(synthetic_data.get('mode', 'static')).strip().lower()
@@ -475,6 +620,9 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
                 'definitions without main_target_id or static weights.'
             )
     dynamics_data = _mapping(data.get('target_dynamics', {}), 'target_dynamics')
+    _reject_unknown(
+        dynamics_data, SECTION_PARAMETERS['target_dynamics'], 'target_dynamics'
+    )
     dynamics_mode = str(dynamics_data.get('mode', 'random_priority')).strip().lower()
     if dynamics_mode != 'random_priority':
         raise ConfigError('target_dynamics.mode must be random_priority.')
@@ -584,11 +732,11 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
             ),
             mpc_horizon=horizon,
             mpc_max_step_m=_finite(
-                controller_data.get('mpc_max_step_m'),
+                controller_data.get('mpc_max_step_m', 0.333333),
                 'controller.mpc_max_step_m', positive=True,
             ),
             minimum_mpc_lookahead_m=_finite(
-                controller_data.get('minimum_mpc_lookahead_m'),
+                controller_data.get('minimum_mpc_lookahead_m', 0.30),
                 'controller.minimum_mpc_lookahead_m', positive=True,
             ),
             deterministic_seed=controller_seed,
@@ -718,4 +866,6 @@ def load_experiment(path, algorithm_override=None, dry_run_override=None):
         ),
         source_path=source_path,
         targets_path=targets_path,
+        configured_algorithm=configured_algorithm,
+        algorithm_source=('cli' if algorithm_override is not None else 'config'),
     )

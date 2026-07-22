@@ -22,7 +22,7 @@ from waverover_swarm_controller.synthetic_motion import (
 
 
 def config_path():
-    return Path(__file__).parents[1] / 'config' / 'experiment.example.yaml'
+    return Path(__file__).parents[1] / 'config' / 'experiment.yaml'
 
 
 def test_exact_straight_and_left_right_turn_integration():
@@ -98,6 +98,9 @@ def test_different_or_entropy_seeds_change_noisy_trajectory_metadata():
 
 def test_static_mode_preserves_formation_exactly():
     config = load_experiment(config_path())
+    config = replace(
+        config, synthetic_mcs=replace(config.synthetic_mcs, mode='static')
+    )
     positions = generate_formation(config.robot_ids, config.station.position, 0.5)
     trajectory = SyntheticTrajectory(config, positions, 20.0, initial_yaw=0.7)
     result = trajectory.step()
@@ -108,16 +111,20 @@ def test_static_mode_preserves_formation_exactly():
     assert set(result.yaw_rates.values()) == {0.0}
 
 
-def test_dynamic_rigid_motion_preserves_separation_and_connectivity():
-    path = Path(__file__).parents[1] / 'config' / 'dynamic_smoke_test_6.yaml'
+def test_moving_rigid_formation_preserves_separation_and_connectivity():
+    path = Path(__file__).parents[1] / 'config' / 'experiment.yaml'
     config = load_experiment(path)
-    positions = generate_formation(config.robot_ids, config.station.position, 0.5)
+    config = replace(
+        config,
+        synthetic_mcs=replace(config.synthetic_mcs, formation_coupling='rigid'),
+    )
+    positions = generate_formation(config.robot_ids, config.station.position, 1.0)
     trajectory = SyntheticTrajectory(config, positions, 20.0)
     for _index in range(100):
         result = trajectory.step(lambda values: validate_formation(config, values))
         assert all(speed > 0.0 for speed in result.speeds.values())
         validation = validate_formation(config, result.positions)
-        assert validation.minimum_separation_m >= 0.35
+        assert validation.minimum_separation_m >= 0.5
         assert validation.algebraic_connectivity > 0.0
 
 
@@ -142,9 +149,12 @@ def test_invalid_script_and_turn_radius_are_rejected(tmp_path):
 
 def test_metadata_contains_seed_noise_calibration_and_segments():
     config = load_experiment(
-        Path(__file__).parents[1] / 'config' / 'dynamic_smoke_test_6.yaml'
+        Path(__file__).parents[1] / 'config' / 'experiment.yaml'
     )
-    positions = generate_formation(config.robot_ids, config.station.position, 0.5)
+    config = replace(
+        config, synthetic_mcs=replace(config.synthetic_mcs, mode='noisy_path')
+    )
+    positions = generate_formation(config.robot_ids, config.station.position, 1.0)
     trajectory = SyntheticTrajectory(config, positions, 20.0)
     metadata = trajectory.metadata()
     assert metadata['schema_version'] == 2
@@ -153,7 +163,7 @@ def test_metadata_contains_seed_noise_calibration_and_segments():
     assert metadata['vehicle']['straight_speed_mps'] > 0.0
     assert metadata['generated_segments']
     assert metadata['derived_rover_seeds']
-    assert metadata['initial_radius_m'] == pytest.approx(0.5)
+    assert metadata['initial_radius_m'] == pytest.approx(1.0)
 
 
 def test_all_pose_messages_in_a_tick_can_share_one_timestamp():
@@ -167,7 +177,7 @@ def test_all_pose_messages_in_a_tick_can_share_one_timestamp():
 
 def independent_config(seed=2026):
     config = load_experiment(
-        Path(__file__).parents[1] / 'config' / 'dynamic_smoke_test_6.yaml'
+        Path(__file__).parents[1] / 'config' / 'experiment.yaml'
     )
     return replace(
         config,
@@ -216,7 +226,7 @@ def test_independent_motion_is_finite_forward_atomic_and_safe():
             lambda values: validate_formation(config, values)
         )
         validation = trajectory.last_true_validation
-        assert validation.minimum_separation_m >= 0.35
+        assert validation.minimum_separation_m >= 0.5
         assert all(config.safety.geofence.contains(point)
                    for point in result.positions.values())
         assert all(math.isfinite(value) for state in trajectory.states.values()

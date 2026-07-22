@@ -44,23 +44,14 @@ The ROS domain and middleware settings must match the MCS bridge and rovers.
 Keep these files together so the relative targets_file path resolves:
 
 /home/derder/waverover_experiments/
-  dynamic_heuristic.yaml
-  dynamic_heuristic_decentralized.yaml
-  dynamic_convex.yaml
-  dynamic_mpc_centralized.yaml
-  dynamic_mpc_distributed.yaml
-  targets_smoke_6.yaml
+  experiment.yaml
+  targets_setup_1.yaml
 
-Every experiment YAML requires this complete controller block:
+The canonical experiment YAML contains controller.common plus one strictly
+validated controller.algorithms block for every supported algorithm.
 
-controller:
-  algorithm: <algorithm>
-  control_period_sec: 1.0
-  mpc_horizon: 5
-  mpc_max_step_m: 0.333333
-  minimum_mpc_lookahead_m: 0.30
-  deterministic_seed: 42
-  distributed_update_semantics: jacobi
+controller.algorithm selects the default. run_experiment --algorithm overrides
+it for one run without editing the file.
 
 and target dynamics:
 
@@ -86,28 +77,28 @@ Supported algorithms:
 ----------------------------------
 
 run_experiment starts rosbag, the synthetic MCS publisher, and the coordinator.
-It forces the coordinator into dry-run and therefore records computed results
-without publishing rover waypoints.
+It preserves safety.dry_run from experiment.yaml; keep that value true to
+record computed results without publishing rover waypoints.
 
 Centralized heuristic:
 
-ros2 run waverover_swarm_controller run_experiment   --config /home/derder/waverover_experiments/dynamic_heuristic.yaml
+ros2 run waverover_swarm_controller run_experiment   --config /home/derder/waverover_experiments/experiment.yaml --algorithm heuristic
 
 Decentralized heuristic:
 
-ros2 run waverover_swarm_controller run_experiment   --config /home/derder/waverover_experiments/dynamic_heuristic_decentralized.yaml
+ros2 run waverover_swarm_controller run_experiment   --config /home/derder/waverover_experiments/experiment.yaml --algorithm heuristic_decentralized
 
 Centralized convex:
 
-ros2 run waverover_swarm_controller run_experiment   --config /home/derder/waverover_experiments/dynamic_convex.yaml
+ros2 run waverover_swarm_controller run_experiment   --config /home/derder/waverover_experiments/experiment.yaml --algorithm convex
 
 Centralized MPC:
 
-ros2 run waverover_swarm_controller run_experiment   --config /home/derder/waverover_experiments/dynamic_mpc_centralized.yaml
+ros2 run waverover_swarm_controller run_experiment   --config /home/derder/waverover_experiments/experiment.yaml --algorithm mpc_centralized
 
 Distributed MPC:
 
-ros2 run waverover_swarm_controller run_experiment   --config /home/derder/waverover_experiments/dynamic_mpc_distributed.yaml
+ros2 run waverover_swarm_controller run_experiment   --config /home/derder/waverover_experiments/experiment.yaml --algorithm mpc_distributed
 
 Stop a run cleanly with Ctrl-C. Do not use kill -9.
 
@@ -129,11 +120,11 @@ Use seed: null for a different non-reproducible seed on each run.
 
 Terminal 1 - synthetic poses:
 
-ros2 launch waverover_swarm_controller synthetic_mcs.launch.py   config_file:=/home/derder/waverover_experiments/dynamic_heuristic.yaml   rate_hz:=20.0
+ros2 launch waverover_swarm_controller synthetic_mcs.launch.py   config_file:=/home/derder/waverover_experiments/experiment.yaml   rate_hz:=20.0
 
 Terminal 2 - coordinator, no waypoint publication:
 
-ros2 launch waverover_swarm_controller swarm_controller.launch.py   config_file:=/home/derder/waverover_experiments/dynamic_heuristic.yaml   algorithm:=heuristic   dry_run:=true
+ros2 launch waverover_swarm_controller swarm_controller.launch.py   config_file:=/home/derder/waverover_experiments/experiment.yaml   algorithm:=heuristic   dry_run:=true
 
 Terminal 3 - verify pose rate:
 
@@ -162,7 +153,7 @@ ros2 topic echo /waverover_131/waypoints
 
 Terminal 2 - relaunch the coordinator (automatic publication):
 
-ros2 launch waverover_swarm_controller swarm_controller.launch.py   config_file:=/home/derder/waverover_experiments/dynamic_heuristic.yaml   algorithm:=heuristic   dry_run:=false
+ros2 launch waverover_swarm_controller swarm_controller.launch.py   config_file:=/home/derder/waverover_experiments/experiment.yaml   algorithm:=heuristic   dry_run:=false
 
 With fresh synchronized poses and a valid result, one active waypoint is
 published automatically per rover and refreshed every 1 second. Pending
@@ -195,7 +186,7 @@ quaternion. Fresh synchronized poses are required for every robot_ids entry.
 
 Start with a real-MCS dry-run:
 
-ros2 launch waverover_swarm_controller swarm_controller.launch.py   config_file:=/home/derder/waverover_experiments/dynamic_heuristic.yaml   algorithm:=heuristic   dry_run:=true
+ros2 launch waverover_swarm_controller swarm_controller.launch.py   config_file:=/home/derder/waverover_experiments/experiment.yaml   algorithm:=heuristic   dry_run:=true
 
 Inspect all computed setpoints:
 
@@ -208,7 +199,7 @@ ros2 topic echo /waverover_131/waypoints
 
 Then relaunch in live mode; validated results dispatch automatically:
 
-ros2 launch waverover_swarm_controller swarm_controller.launch.py   config_file:=/home/derder/waverover_experiments/dynamic_heuristic.yaml   algorithm:=heuristic   dry_run:=false
+ros2 launch waverover_swarm_controller swarm_controller.launch.py   config_file:=/home/derder/waverover_experiments/experiment.yaml   algorithm:=heuristic   dry_run:=false
 
 Stop the coordinator with Ctrl-C when finished and verify end_trial for each
 commanded rover.
@@ -228,7 +219,7 @@ recording:
 
 Then use the normal supervisor command:
 
-ros2 run waverover_swarm_controller run_experiment   --config /home/derder/waverover_experiments/dynamic_heuristic.yaml
+ros2 run waverover_swarm_controller run_experiment   --config /home/derder/waverover_experiments/experiment.yaml
 
 The supervisor respects safety.dry_run from this YAML. Keep it true for a
 non-publishing recording; false enables automatic validated waypoint dispatch.
@@ -239,11 +230,11 @@ non-publishing recording; false enables automatic validated waypoint dispatch.
 
 Interactive:
 
-ros2 run waverover_swarm_controller visualize_targets   /home/derder/waverover_experiments/targets_smoke_6.yaml   --experiment-file /home/derder/waverover_experiments/dynamic_heuristic.yaml
+ros2 run waverover_swarm_controller visualize_targets   /home/derder/waverover_experiments/targets_smoke_6.yaml   --experiment-file /home/derder/waverover_experiments/experiment.yaml
 
 Headless:
 
-ros2 run waverover_swarm_controller visualize_targets   /home/derder/waverover_experiments/targets_smoke_6.yaml   --experiment-file /home/derder/waverover_experiments/dynamic_heuristic.yaml   --output /tmp/targets_smoke_6.png   --no-show
+ros2 run waverover_swarm_controller visualize_targets   /home/derder/waverover_experiments/targets_smoke_6.yaml   --experiment-file /home/derder/waverover_experiments/experiment.yaml   --output /tmp/targets_smoke_6.png   --no-show
 
 
 10. ANALYZE AND COMPARE RECORDED RUNS

@@ -39,7 +39,12 @@ def load_run_data(run_directory):
     config_path = run_directory / manifest.get(
         'resolved_config', 'config/experiment.yaml'
     )
-    config = load_experiment(config_path)
+    effective_algorithm = manifest.get(
+        'effective_algorithm', manifest.get('algorithm')
+    )
+    config = load_experiment(
+        config_path, algorithm_override=effective_algorithm
+    )
     bag_directory = locate_bag(run_directory)
     reader = rosbag2_py.SequentialReader()
     reader.open(

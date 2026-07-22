@@ -3,8 +3,8 @@
 import argparse
 from dataclasses import asdict
 from datetime import datetime, timezone
-import importlib.metadata
 import hashlib
+import importlib.metadata
 import json
 import os
 from pathlib import Path
@@ -16,27 +16,26 @@ import subprocess
 import sys
 import time
 
+from geometry_msgs.msg import Twist
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import String
-from geometry_msgs.msg import Twist
 from tf2_msgs.msg import TFMessage
-import yaml
 
 from waverover.stack_config import load_stack_config
+import yaml
 
-from .config import load_experiment
+from .config import load_experiment, SUPPORTED_ALGORITHMS
 from .experiment_recording import (
-    MANIFEST_SCHEMA_VERSION,
-    RUN_EVENT_SCHEMA_VERSION,
     atomic_write_yaml,
     create_run_directory,
     default_run_root,
+    MANIFEST_SCHEMA_VERSION,
     qos_overrides,
     recording_topics,
-    utc_timestamp,
+    RUN_EVENT_SCHEMA_VERSION,
     write_qos_overrides,
 )
 from .synthetic_motion import derive_rover_seed
@@ -168,7 +167,6 @@ def _resolved_run_config(
     config_path, destination, algorithm, synthetic_seed, target_seed=None
 ):
     source = yaml.safe_load(Path(config_path).read_text(encoding='utf-8'))
-    source.setdefault('controller', {})['algorithm'] = algorithm
     source.setdefault('synthetic_mcs', {})['seed'] = int(synthetic_seed)
     source.setdefault('target_dynamics', {})['seed'] = int(
         synthetic_seed if target_seed is None else target_seed
@@ -183,7 +181,10 @@ def parse_arguments(arguments=None):
         description='Record a reproducible PC-only WaveRover experiment.'
     )
     parser.add_argument('--config', required=True)
-    parser.add_argument('--algorithm')
+    parser.add_argument(
+        '--algorithm', choices=SUPPORTED_ALGORITHMS,
+        help='Override controller.algorithm for this run only.',
+    )
     parser.add_argument('--duration-sec', type=float)
     parser.add_argument('--output-root')
     parser.add_argument('--profile', choices=('core', 'full'))
@@ -194,10 +195,26 @@ def parse_arguments(arguments=None):
     return parser.parse_args(arguments)
 
 
+def resolve_algorithm_selection(config_path, algorithm_override=None):
+    """Return configured/effective configs and manifest selection metadata."""
+    configured = load_experiment(config_path)
+    effective = load_experiment(
+        config_path, algorithm_override=algorithm_override
+    )
+    metadata = {
+        'configured_algorithm': configured.controller.algorithm,
+        'effective_algorithm': effective.controller.algorithm,
+        'algorithm_source': ('cli' if algorithm_override else 'config'),
+    }
+    return configured, effective, metadata
+
+
 def main(args=None):
     arguments = parse_arguments(args)
-    original_config = load_experiment(arguments.config)
-    algorithm = arguments.algorithm or original_config.controller.algorithm
+    original_config, selected_config, algorithm_selection = (
+        resolve_algorithm_selection(arguments.config, arguments.algorithm)
+    )
+    algorithm = selected_config.controller.algorithm
     requested_seed = (
         None if arguments.fresh_seed else (
             arguments.seed
@@ -231,7 +248,9 @@ def main(args=None):
         synthetic_seed,
         target_seed,
     )
-    config = load_experiment(resolved_config_path)
+    config = load_experiment(
+        resolved_config_path, algorithm_override=arguments.algorithm
+    )
     resolved_initial_priority = TargetManager(
         config.targets, config.target_dynamics, start_time=0.0
     ).priority_target_id
@@ -286,6 +305,7 @@ def main(args=None):
         'resolved_config': 'config/experiment.yaml',
         'resolved_targets': 'config/targets.yaml',
         'algorithm': algorithm,
+        **algorithm_selection,
         'dry_run': config.safety.dry_run,
         'pose_source': pose_source,
         'synthetic_mode': config.synthetic_mcs.mode,

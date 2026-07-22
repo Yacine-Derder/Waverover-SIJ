@@ -45,8 +45,9 @@ def _make_run(tmp_path, state='completed'):
     (run / 'bag').mkdir()
     (run / 'analysis').mkdir()
     config = yaml.safe_load(
-        (package / 'config' / 'smoke_test_134.yaml').read_text(encoding='utf-8')
+        (package / 'config' / 'experiment.yaml').read_text(encoding='utf-8')
     )
+    config['robot_ids'] = ['134']
     config['targets_file'] = 'targets.yaml'
     (run / 'config' / 'experiment.yaml').write_text(
         yaml.safe_dump(config), encoding='utf-8'
@@ -59,6 +60,9 @@ def _make_run(tmp_path, state='completed'):
         'run_id': 'fixture',
         'state': state,
         'algorithm': 'mpc_distributed',
+        'configured_algorithm': 'heuristic',
+        'effective_algorithm': 'mpc_distributed',
+        'algorithm_source': 'cli',
         'synthetic_mode': 'preset',
         'synthetic_seed': 42,
         'robot_ids': ['134'],

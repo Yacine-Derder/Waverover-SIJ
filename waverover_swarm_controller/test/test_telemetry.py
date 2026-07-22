@@ -53,6 +53,8 @@ def test_controller_telemetry_is_versioned_structured_and_canonical(
         },
         'none',
     )
+    assert payload['configured_algorithm'] == 'heuristic'
+    assert payload['effective_algorithm'] == example_config.controller.algorithm
 
     assert payload['schema_version'] == 7
     assert payload['result_state'] == 'valid'

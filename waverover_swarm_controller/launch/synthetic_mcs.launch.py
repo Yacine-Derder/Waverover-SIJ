@@ -10,7 +10,7 @@ def generate_launch_description():
     default_config = PathJoinSubstitution([
         FindPackageShare('waverover_swarm_controller'),
         'config',
-        'experiment.example.yaml',
+        'experiment.yaml',
     ])
     arguments = (
         ('config_file', default_config, str),

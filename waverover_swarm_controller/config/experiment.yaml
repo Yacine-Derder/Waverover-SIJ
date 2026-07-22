@@ -1,6 +1,7 @@
-# PC-only reproducible random-motion recording test: centralized heuristic.
+# Canonical PC experiment configuration. Verify laboratory geometry and radio
+# ranges before physical use. Select one exact identifier below; run_experiment
+# --algorithm can override it for one run without modifying this file.
 frame_id: robotics_lab
-
 robot_ids: ["131", "132", "133", "134", "135", "136"]
 
 pose:
@@ -30,17 +31,35 @@ vehicle:
 
 controller:
   algorithm: heuristic
-  control_period_sec: 1.0
-  mpc_horizon: 5
-  mpc_max_step_m: 0.333333
-  minimum_mpc_lookahead_m: 0.30
-  deterministic_seed: 42
-  distributed_update_semantics: jacobi
-  distributed_inter_agent_weight: 2.0
+  common:
+    control_period_sec: 1.0
+    deterministic_seed: 42
+  # Every registered algorithm has one strictly validated parameter block.
+  # Empty heuristic blocks are intentional: they use only common parameters.
+  algorithms:
+    heuristic: {}
+    heuristic_decentralized: {}
+    convex:
+      mpc_max_step_m: 0.333333
+      connectivity_recovery_slack_penalty: 10000.0
+    mpc_centralized:
+      mpc_horizon: 5
+      mpc_max_step_m: 0.333333
+      minimum_mpc_lookahead_m: 0.30
+      connectivity_recovery_slack_penalty: 10000.0
+    mpc_distributed:
+      mpc_horizon: 5
+      mpc_max_step_m: 0.333333
+      minimum_mpc_lookahead_m: 0.30
+      distributed_update_semantics: jacobi
+      distributed_inter_agent_weight: 2.0
+      connectivity_recovery_slack_penalty: 10000.0
 
 waypoint_dispatch:
   refresh_period_sec: 1.0
   active_waypoint_warning_sec: 10.0
+  repeated_destination_epsilon_m: 0.05
+  completed_destination_reissue_distance_m: 0.30
 
 communication:
   ideal_range_m: 1.5
@@ -48,12 +67,19 @@ communication:
 
 safety:
   dry_run: true
-  minimum_separation_m: 0.35
+  collision_policy: best_effort
+  preferred_separation_m: 0.5
+  collision_repair_max_iterations: 50
   controller_result_timeout_sec: 2.5
-  geofence: {x_min: -4.0, x_max: 4.0, y_min: -4.0, y_max: 4.0}
+  geofence:
+    x_min: -4.0
+    x_max: 4.0
+    y_min: -4.0
+    y_max: 4.0
 
 synthetic_mcs:
   mode: random_walk
+  preset: figure_eight
   seed: 2026
   duration_sec: 120.0
   formation_coupling: independent
@@ -66,9 +92,10 @@ synthetic_mcs:
   measurement_position_std_m: 0.002
   measurement_heading_std_rad: 0.005
   maximum_transition_attempts: 50
+  script: []
 
 recording:
-  root_directory: /home/derder/waverover_runs
+  root_directory: null
   profile: core
   storage_id: sqlite3
   pose_source: synthetic

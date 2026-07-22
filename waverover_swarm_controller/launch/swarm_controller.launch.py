@@ -10,7 +10,7 @@ def generate_launch_description():
     default_config = PathJoinSubstitution([
         FindPackageShare('waverover_swarm_controller'),
         'config',
-        'experiment.example.yaml',
+        'experiment.yaml',
     ])
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -20,10 +20,10 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'algorithm',
-            default_value='heuristic',
+            default_value='',
             description=(
-                'heuristic, heuristic_decentralized, convex, '
-                'mpc_centralized, or mpc_distributed'
+                'Optional config override: heuristic, heuristic_decentralized, '
+                'convex, mpc_centralized, or mpc_distributed'
             ),
         ),
         DeclareLaunchArgument(

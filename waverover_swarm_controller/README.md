@@ -1,6 +1,6 @@
 # WaveRover swarm controller (operator PC only)
 
-The default target switch period is 20 seconds. Real dispatch treats 0.35 m
+The default target switch period is 20 seconds. Real dispatch treats 0.5 m
 separation as a best-effort preference and sends every algorithm through the
 same deterministic, geofence-aware repair stage. Collision warnings and
 residual violations are telemetry, not trial-latching faults; structural
@@ -184,11 +184,18 @@ not an exact aircraft model. The onboard `0.15 m` goal tolerance is unchanged.
 
 ## Configuration and targets
 
-Copy `config/experiment.example.yaml` to a PC experiment-specific file. It
+`config/experiment.yaml` is the canonical experiment configuration. Copy it
+with its referenced targets file only when site-specific geometry is needed. It
 defines the `robotics_lab` frame, explicit rover IDs, pose freshness/skew,
 station, controller, vehicle, dispatcher, communication, dry-run, separation,
 and geofence settings. `targets_file` is resolved relative to the experiment
 file unless it is absolute.
+
+Controller selection is strict and centralized in this file. `controller.common`
+contains shared timing and seed values, while `controller.algorithms` contains
+validated blocks for `heuristic`, `heuristic_decentralized`, `convex`,
+`mpc_centralized`, and `mpc_distributed`. Unknown keys and missing selected
+algorithm parameters are errors.
 
 `config/targets.yaml` is an installed editable example:
 
@@ -282,19 +289,19 @@ Keep experiment-specific coordinates outside the Git checkout:
 
 ```bash
 mkdir -p /home/derder/waverover_experiments
-cp /home/derder/ros2_ws/src/waverover_swarm_controller/config/smoke_test_6.yaml \
+cp /home/derder/ros2_ws/src/waverover_swarm_controller/config/experiment.yaml \
   /home/derder/waverover_experiments/pc_test.yaml
-cp /home/derder/ros2_ws/src/waverover_swarm_controller/config/targets_smoke_6.yaml \
-  /home/derder/waverover_experiments/targets_smoke_6.yaml
+cp /home/derder/ros2_ws/src/waverover_swarm_controller/config/targets_setup_1.yaml \
+  /home/derder/waverover_experiments/targets_setup_1.yaml
 
 nano /home/derder/waverover_experiments/pc_test.yaml
 ```
 
 At minimum, verify `robot_ids`, `station.position`,
-`communication.*_range_m`, `safety.minimum_separation_m`, and the complete
+`communication.*_range_m`, `safety.preferred_separation_m`, and the complete
 `safety.geofence`. Edit target coordinates and weights in
-`/home/derder/waverover_experiments/targets_smoke_6.yaml`. The relative
-`targets_file: targets_smoke_6.yaml` entry remains valid because both copied
+`/home/derder/waverover_experiments/targets_setup_1.yaml`. The relative
+`targets_file: targets_setup_1.yaml` entry remains valid because both copied
 files are in the same directory.
 
 Use this setup block at the start of every terminal:
@@ -370,7 +377,8 @@ messages on `/waverover_<ID>/waypoints` or `/waverover_<ID>/end_trial`.
 The `algorithm` launch value may be `heuristic`,
 `heuristic_decentralized`, `convex`, `mpc_centralized`, or
 `mpc_distributed`. Stop and relaunch the coordinator to change algorithms.
-The launch argument overrides `controller.algorithm` in the YAML.
+An omitted/empty launch argument uses `controller.algorithm`; a nonempty value
+overrides it for that coordinator process.
 
 ### 3. Fake-MCS waypoint-publication test with rovers off
 
@@ -479,7 +487,7 @@ Always begin in dry-run:
 
 ```bash
 ros2 launch waverover_swarm_controller swarm_controller.launch.py \
-  config_file:=<absolute path to experiment.example.yaml> \
+  config_file:=<absolute path to experiment.yaml> \
   algorithm:=heuristic \
   dry_run:=true
 ```
@@ -571,7 +579,7 @@ offline loading remains tolerant of schema 1 bags.
 
 ```bash
 ros2 launch waverover_swarm_controller synthetic_mcs.launch.py \
-  config_file:=/home/derder/ros2_ws/src/waverover_swarm_controller/config/smoke_test_6.yaml \
+  config_file:=/home/derder/ros2_ws/src/waverover_swarm_controller/config/experiment.yaml \
   rate_hz:=20.0 \
   radius_m:=0.75 \
   angle_offset_rad:=0.0 \
@@ -618,7 +626,7 @@ geofence, and ideal/maximum communication ranges from an experiment:
 ```bash
 ros2 run waverover_swarm_controller visualize_targets \
   /home/derder/ros2_ws/src/waverover_swarm_controller/config/targets_smoke_6.yaml \
-  --experiment-file /home/derder/ros2_ws/src/waverover_swarm_controller/config/smoke_test_6.yaml
+  --experiment-file /home/derder/ros2_ws/src/waverover_swarm_controller/config/experiment.yaml
 ```
 
 For SSH or headless WSL, select the noninteractive backend with `--no-show`:
@@ -626,7 +634,7 @@ For SSH or headless WSL, select the noninteractive backend with `--no-show`:
 ```bash
 ros2 run waverover_swarm_controller visualize_targets \
   /home/derder/ros2_ws/src/waverover_swarm_controller/config/targets_smoke_6.yaml \
-  --experiment-file /home/derder/ros2_ws/src/waverover_swarm_controller/config/smoke_test_6.yaml \
+  --experiment-file /home/derder/ros2_ws/src/waverover_swarm_controller/config/experiment.yaml \
   --output /tmp/targets_smoke_6.png \
   --no-show
 ```
@@ -644,8 +652,13 @@ waypoints or `end_trial`; `false` allows automatic validated dispatch.
 
 ```bash
 ros2 run waverover_swarm_controller run_experiment \
-  --config /home/yacin/waverover/src/waverover_swarm_controller/config/dynamic_smoke_test_6.yaml
+  --config /home/derder/ros2_ws/src/waverover_swarm_controller/config/experiment.yaml
 ```
+
+Use `--algorithm convex` (or any other supported exact identifier) for a
+single-run override. The YAML is not edited. The manifest records configured
+and effective algorithms plus whether selection came from config or CLI, and
+the run directory uses the effective value.
 
 The XDG-compatible default root is `~/.local/share/waverover/runs`; override it
 with `recording.root_directory`. Runs are never overwritten:

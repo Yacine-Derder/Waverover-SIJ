@@ -14,7 +14,7 @@ from waverover_swarm_controller.models import (
 
 @pytest.fixture
 def example_config():
-    path = Path(__file__).parents[1] / 'config' / 'experiment.example.yaml'
+    path = Path(__file__).parents[1] / 'config' / 'experiment.yaml'
     config = load_experiment(path)
     return replace(config, robot_ids=('robot_2', 'robot_10', 'robot_30'))
 

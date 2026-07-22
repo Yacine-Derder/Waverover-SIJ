@@ -99,6 +99,9 @@ def build_controller_telemetry(
             'nanosec': int(ros_timestamp.nanosec),
         },
         'algorithm': config.controller.algorithm,
+        'configured_algorithm': config.configured_algorithm,
+        'effective_algorithm': config.controller.algorithm,
+        'algorithm_source': config.algorithm_source,
         'controller_mode': (
             execution_outcome.controller_mode
             if execution_outcome is not None else (

@@ -1,4 +1,5 @@
 from dataclasses import replace
+import inspect
 import math
 from pathlib import Path
 import time
@@ -25,11 +26,20 @@ import yaml
 
 
 class Logger:
-    def info(self, _message):
-        pass
+    def __init__(self):
+        self.callsite_severities = {}
 
-    def warn(self, _message):
-        pass
+    def _log(self, severity):
+        callsite = inspect.currentframe().f_back.f_back.f_lineno
+        previous = self.callsite_severities.setdefault(callsite, severity)
+        if previous != severity:
+            raise ValueError('Logger severity cannot be changed between calls.')
+
+    def info(self, _message):
+        self._log('info')
+
+    def warning(self, _message):
+        self._log('warning')
 
 
 class Dispatcher:
@@ -64,6 +74,7 @@ def _result(snapshot, mode, status='optimal', slack=0.0, edges=()):
 
 
 def _coordinator(config, controller):
+    logger = Logger()
     return SimpleNamespace(
         config=config,
         controller=controller,
@@ -77,7 +88,7 @@ def _coordinator(config, controller):
         fallback_counters={},
         consecutive_recovery_cycles=0,
         _last_controller_mode=None,
-        get_logger=lambda: Logger(),
+        get_logger=lambda: logger,
     )
 
 
@@ -107,6 +118,7 @@ def test_normal_and_recovery_hierarchy_modes(
     assert outcome.controller_mode == normal_mode
     assert outcome.dispatch_allowed
     assert outcome.consecutive_recovery_cycles == 0
+    assert 'outcome_reporting_error' not in outcome.failure_metadata
 
     recovery = _result(snapshot, recovery_mode, slack=0.125)
     controller.compute = lambda _snapshot: (_ for _ in ()).throw(
@@ -119,11 +131,53 @@ def test_normal_and_recovery_hierarchy_modes(
     assert outcome.failure_metadata['maximum_connectivity_slack_m'] == 0.125
     assert outcome.complete_command_set_generated
     assert outcome.final_command_set_passed_validation
+    assert 'outcome_reporting_error' not in outcome.failure_metadata
     controller.compute = lambda _snapshot: normal
     outcome = SwarmCoordinator._compute_valid_result(coordinator, snapshot)
     assert outcome.controller_mode == normal_mode
     assert outcome.consecutive_recovery_cycles == 0
     assert outcome.fallback_counters[recovery_mode] == 1
+    assert 'outcome_reporting_error' not in outcome.failure_metadata
+
+
+def test_outcome_logging_failure_is_non_recursive_and_preserves_cause(
+    example_config, snapshot
+):
+    class BrokenLogger:
+        def warning(self, _message):
+            raise RuntimeError('reporting failed')
+
+    coordinator = _coordinator(example_config, SimpleNamespace())
+    coordinator.get_logger = lambda: BrokenLogger()
+    failure = {'controller_exception': {'message': 'solver infeasible'}}
+    outcome = SwarmCoordinator._finish_outcome(
+        coordinator, None, False, False, False, 'safe_hold', failure
+    )
+    assert outcome.controller_mode == 'safe_hold'
+    assert outcome.failure_metadata['controller_exception']['message'] == (
+        'solver infeasible'
+    )
+    assert outcome.failure_metadata['outcome_reporting_error'] == {
+        'type': 'RuntimeError', 'message': 'reporting failed'
+    }
+
+
+def test_real_jazzy_logger_accepts_repeated_mixed_severity_transitions(
+    example_config
+):
+    rclpy_logging = pytest.importorskip('rclpy.logging')
+    coordinator = _coordinator(example_config, SimpleNamespace())
+    coordinator.get_logger = lambda: rclpy_logging.get_logger(
+        'outcome_transition_regression'
+    )
+    for mode in (
+        'normal_convex', 'recovery_convex', 'normal_mpc', 'safe_hold',
+        'normal_convex', 'non_dispatching_safe_hold',
+    ):
+        outcome = SwarmCoordinator._finish_outcome(
+            coordinator, None, False, False, False, mode, {}
+        )
+        assert 'outcome_reporting_error' not in outcome.failure_metadata
 
 
 def test_actual_convex_recovery_reports_nonnegative_explicit_slack(
@@ -302,23 +356,26 @@ def test_distributed_no_selected_rover_edge_uses_closest_rover_objective(
 
 
 def test_recovery_penalty_defaults_and_rejects_nonpositive(tmp_path):
-    source_path = Path(__file__).parents[1] / 'config' / 'experiment.example.yaml'
+    source_path = Path(__file__).parents[1] / 'config' / 'experiment.yaml'
     source = yaml.safe_load(source_path.read_text(encoding='utf-8'))
     source['targets_file'] = str(
         Path(__file__).parents[1] / 'config' / 'targets.yaml'
     )
-    source['controller'].pop('connectivity_recovery_slack_penalty')
+    source['controller']['algorithms']['convex'].pop(
+        'connectivity_recovery_slack_penalty'
+    )
     legacy = tmp_path / 'legacy.yaml'
     legacy.write_text(yaml.safe_dump(source), encoding='utf-8')
-    assert load_experiment(
-        legacy
-    ).controller.connectivity_recovery_slack_penalty == pytest.approx(10000.0)
+    with pytest.raises(ConfigError, match='connectivity_recovery_slack_penalty'):
+        load_experiment(legacy)
 
-    source['controller']['connectivity_recovery_slack_penalty'] = 0.0
+    source['controller']['algorithms']['convex'][
+        'connectivity_recovery_slack_penalty'
+    ] = 0.0
     invalid = tmp_path / 'invalid.yaml'
     invalid.write_text(yaml.safe_dump(source), encoding='utf-8')
     with pytest.raises(ConfigError, match='connectivity_recovery_slack_penalty'):
-        load_experiment(invalid)
+        load_experiment(invalid, algorithm_override='convex')
 
 
 def test_normal_and_recovery_candidates_are_each_repaired_once(

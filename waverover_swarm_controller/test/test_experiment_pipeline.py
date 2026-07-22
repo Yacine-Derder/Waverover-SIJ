@@ -22,12 +22,16 @@ from waverover_swarm_controller.experiment_recording import (
     recording_topics,
 )
 from waverover_swarm_controller.replay_run import interpolate_pose
-from waverover_swarm_controller.run_experiment import _resolved_run_config
+from waverover_swarm_controller.run_experiment import (
+    _resolved_run_config,
+    parse_arguments,
+    resolve_algorithm_selection,
+)
 
 
 def example_config():
     return load_experiment(
-        Path(__file__).parents[1] / 'config' / 'experiment.example.yaml'
+        Path(__file__).parents[1] / 'config' / 'experiment.yaml'
     )
 
 
@@ -107,9 +111,29 @@ def test_resolved_run_config_preserves_safety_dry_run(
 
     resolved = yaml.safe_load(destination.read_text(encoding='utf-8'))
     assert resolved['safety']['dry_run'] is dry_run
-    assert resolved['controller']['algorithm'] == 'convex'
+    assert resolved['controller']['algorithm'] == 'heuristic'
     assert resolved['synthetic_mcs']['seed'] == 42
     assert resolved['targets_file'] == 'targets.yaml'
+
+
+def test_cli_algorithm_override_validation_and_selection_metadata():
+    path = Path(__file__).parents[1] / 'config' / 'experiment.yaml'
+    configured, effective, metadata = resolve_algorithm_selection(path)
+    assert configured.controller.algorithm == 'heuristic'
+    assert effective.controller.algorithm == 'heuristic'
+    assert metadata == {
+        'configured_algorithm': 'heuristic',
+        'effective_algorithm': 'heuristic',
+        'algorithm_source': 'config',
+    }
+
+    configured, effective, metadata = resolve_algorithm_selection(path, 'convex')
+    assert configured.controller.algorithm == 'heuristic'
+    assert effective.controller.algorithm == 'convex'
+    assert metadata['algorithm_source'] == 'cli'
+    assert parse_arguments(['--config', str(path)]).algorithm is None
+    with pytest.raises(SystemExit):
+        parse_arguments(['--config', str(path), '--algorithm', 'mpc'])
 
 
 def test_known_paper_metrics_and_yaw_wrap():

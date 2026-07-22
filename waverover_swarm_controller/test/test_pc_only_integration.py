@@ -276,7 +276,7 @@ def test_launch_is_standalone_dry_run_by_default():
     }
     nodes = [entity for entity in description.entities if isinstance(entity, Node)]
     assert arguments['dry_run'].default_value[0].text == 'true'
-    assert arguments['algorithm'].default_value[0].text == 'heuristic'
+    assert arguments['algorithm'].default_value[0].text == ''
     assert len(nodes) == 1
     assert nodes[0]._Node__package == 'waverover_swarm_controller'
 

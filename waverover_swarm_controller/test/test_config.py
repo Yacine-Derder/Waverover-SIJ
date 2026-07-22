@@ -3,11 +3,13 @@ from pathlib import Path
 import pytest
 import yaml
 
-from waverover_swarm_controller.config import ConfigError, load_experiment
+from waverover_swarm_controller.config import (
+    ConfigError, load_experiment, SUPPORTED_ALGORITHMS,
+)
 
 
 def example_path():
-    return Path(__file__).parents[1] / 'config' / 'experiment.example.yaml'
+    return Path(__file__).parents[1] / 'config' / 'experiment.yaml'
 
 
 def test_calibrated_defaults_and_pc_robot_ids():
@@ -39,11 +41,11 @@ def test_calibrated_defaults_and_pc_robot_ids():
     )
     assert config.target_dynamics.switch_period_sec == pytest.approx(20.0)
     assert config.safety.dry_run
-    assert config.safety.preferred_separation_m == pytest.approx(0.35)
-    assert config.synthetic_mcs.mode == 'static'
-    assert config.synthetic_mcs.formation_coupling == 'rigid'
-    assert config.synthetic_mcs.connectivity_policy == 'enforce'
-    assert config.synthetic_mcs.initial_radius_m == pytest.approx(0.5)
+    assert config.safety.preferred_separation_m == pytest.approx(0.5)
+    assert config.synthetic_mcs.mode == 'random_walk'
+    assert config.synthetic_mcs.formation_coupling == 'independent'
+    assert config.synthetic_mcs.connectivity_policy == 'observe'
+    assert config.synthetic_mcs.initial_radius_m == pytest.approx(1.0)
     assert config.recording.profile == 'core'
     assert config.analysis.connectivity_alpha == pytest.approx(5.0)
 
@@ -52,7 +54,9 @@ def test_targets_use_neutral_string_ids():
     config = load_experiment(example_path())
     ids = [target.target_id for target in config.targets]
 
-    assert ids == ['target_0', 'target_1', 'target_2', 'target_3']
+    assert ids == [
+        'target_0', 'target_1', 'target_2', 'target_3', 'target_4', 'target_5'
+    ]
     assert not any(target.is_priority for target in config.targets)
     assert config.target_dynamics.mode == 'random_priority'
 
@@ -91,15 +95,11 @@ def test_absent_target_switch_period_defaults_to_twenty_seconds(tmp_path):
     ).target_dynamics.switch_period_sec == pytest.approx(20.0)
 
 
-def test_real_experiments_use_best_effort_thirty_five_centimeter_separation():
-    config_dir = Path(__file__).parents[1] / 'config'
-    real_paths = sorted(config_dir.glob('*_real.yaml'))
-    assert real_paths
-    for path in real_paths:
-        config = load_experiment(path)
-        assert config.target_dynamics.switch_period_sec == pytest.approx(20.0)
-        assert config.safety.collision_policy == 'best_effort'
-        assert config.safety.preferred_separation_m == pytest.approx(0.35)
+def test_canonical_experiment_uses_best_effort_half_meter_separation():
+    config = load_experiment(example_path())
+    assert config.target_dynamics.switch_period_sec == pytest.approx(20.0)
+    assert config.safety.collision_policy == 'best_effort'
+    assert config.safety.preferred_separation_m == pytest.approx(0.5)
 
 
 def test_legacy_active_timeout_is_accepted_as_nonfatal_warning_alias(tmp_path):
@@ -145,6 +145,56 @@ def test_duplicate_target_and_outside_geofence_are_rejected(tmp_path):
 def test_unknown_algorithm_never_silently_falls_back(algorithm):
     with pytest.raises(ConfigError, match='algorithm'):
         load_experiment(example_path(), algorithm_override=algorithm)
+
+
+@pytest.mark.parametrize('algorithm', SUPPORTED_ALGORITHMS)
+def test_every_algorithm_uses_the_same_canonical_file(algorithm):
+    config = load_experiment(example_path(), algorithm_override=algorithm)
+    assert config.configured_algorithm == 'heuristic'
+    assert config.controller.algorithm == algorithm
+    assert config.algorithm_source == 'cli'
+    assert config.safety.minimum_separation_m == pytest.approx(0.5)
+
+
+def test_selected_algorithm_block_isolated_and_schema_is_strict(tmp_path):
+    source = yaml.safe_load(example_path().read_text(encoding='utf-8'))
+    source['targets_file'] = str(
+        Path(__file__).parents[1] / 'config' / 'targets.yaml'
+    )
+    source['controller']['algorithms']['mpc_distributed'][
+        'distributed_inter_agent_weight'
+    ] = 91.0
+    path = tmp_path / 'isolated.yaml'
+    path.write_text(yaml.safe_dump(source), encoding='utf-8')
+    assert load_experiment(
+        path, algorithm_override='convex'
+    ).controller.distributed_inter_agent_weight == pytest.approx(2.0)
+    assert load_experiment(
+        path, algorithm_override='mpc_distributed'
+    ).controller.distributed_inter_agent_weight == pytest.approx(91.0)
+
+    source['controller']['algorithms']['convex']['typo_parameter'] = 1
+    path.write_text(yaml.safe_dump(source), encoding='utf-8')
+    with pytest.raises(ConfigError, match='unknown parameter'):
+        load_experiment(path)
+
+
+def test_missing_selected_parameter_and_unknown_top_level_rejected(tmp_path):
+    source = yaml.safe_load(example_path().read_text(encoding='utf-8'))
+    source['targets_file'] = str(
+        Path(__file__).parents[1] / 'config' / 'targets.yaml'
+    )
+    source['controller']['algorithms']['mpc_centralized'].pop('mpc_horizon')
+    path = tmp_path / 'missing.yaml'
+    path.write_text(yaml.safe_dump(source), encoding='utf-8')
+    with pytest.raises(ConfigError, match='mpc_horizon'):
+        load_experiment(path, algorithm_override='mpc_centralized')
+
+    source = yaml.safe_load(example_path().read_text(encoding='utf-8'))
+    source['unexpected'] = True
+    path.write_text(yaml.safe_dump(source), encoding='utf-8')
+    with pytest.raises(ConfigError, match='unknown parameter'):
+        load_experiment(path)
 
 
 @pytest.mark.parametrize('coupling', ['rigid', 'independent'])

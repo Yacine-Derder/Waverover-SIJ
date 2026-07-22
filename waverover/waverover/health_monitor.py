@@ -46,6 +46,7 @@ class WatchdogState:
 
 
 class HealthMonitor(Node):
+
     def __init__(self):
         super().__init__('health_monitor')
         config = load_stack_config()

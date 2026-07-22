@@ -14,13 +14,19 @@ jobs:
         with:
           required-ros-distributions: jazzy
       - name: Install declared dependencies
+        env:
+          # rosdep installs pip-backed keys globally on this disposable runner.
+          PIP_BREAK_SYSTEM_PACKAGES: "1"
         run: |
           sudo rosdep init || true
           rosdep update
           # ament_python comes from the selected ROS distribution but is not
-          # represented by a Noble rosdep key.
+          # represented by a Noble rosdep key. Install CVXPY separately so
+          # pip does not try to replace Jazzy's Debian-managed NumPy package.
           rosdep install --from-paths . --ignore-src --rosdistro jazzy -r -y \
-            --skip-keys ament_python
+            --skip-keys "ament_python python3-cvxpy-pip"
+          python3 -m pip install --user "cvxpy<1.7"
+          python3 -c "import cvxpy; print('cvxpy', cvxpy.__version__)"
       - name: Build
         shell: bash
         run: |

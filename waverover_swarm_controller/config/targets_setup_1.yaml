@@ -9,6 +9,6 @@ targets:
   - id: target_3
     position: [-1.7, 0.0]
   - id: target_4
-    position: [1.4, 1.2]
+    position: [1.4, 1.3]
   - id: target_5
-    position: [1.5, 1.0]
+    position: [1.7, 0.9]

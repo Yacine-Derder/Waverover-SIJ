@@ -62,11 +62,11 @@ waypoint_dispatch:
   completed_destination_reissue_distance_m: 0.30
 
 communication:
-  ideal_range_m: 1.5
-  maximum_range_m: 2.0
+  ideal_range_m: 1.0
+  maximum_range_m: 1.5
 
 safety:
-  dry_run: true
+  dry_run: false
   collision_policy: best_effort
   preferred_separation_m: 0.5
   collision_repair_max_iterations: 50
@@ -95,11 +95,11 @@ synthetic_mcs:
   script: []
 
 recording:
-  root_directory: null
+  root_directory: /home/derder/waverover_runs
   profile: core
   storage_id: sqlite3
-  pose_source: synthetic
-  start_synthetic: true
+  pose_source: mcs
+  start_synthetic: false
 
 analysis:
   connectivity_alpha: 5.0

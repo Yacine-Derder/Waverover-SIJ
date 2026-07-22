@@ -236,7 +236,7 @@ LEGACY_CONTROLLER_PARAMETERS = {
 ALGORITHM_PARAMETERS = {
     'heuristic': set(),
     'heuristic_decentralized': set(),
-    'convex': {'mpc_max_step_m', 'connectivity_recovery_slack_penalty'},
+    'convex': {'connectivity_recovery_slack_penalty'},
     'mpc_centralized': {
         'mpc_horizon', 'mpc_max_step_m', 'minimum_mpc_lookahead_m',
         'connectivity_recovery_slack_penalty',

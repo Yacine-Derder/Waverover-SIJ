@@ -1,7 +1,7 @@
 """Dependency-light swarm diagnostics."""
 
-import math
 from itertools import combinations
+import math
 
 import numpy as np
 

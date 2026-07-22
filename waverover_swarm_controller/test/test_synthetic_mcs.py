@@ -7,9 +7,9 @@ import pytest
 from waverover_swarm_controller.config import ConfigError, GeofenceConfig, load_experiment
 from waverover_swarm_controller.synthetic_mcs import (
     generate_formation,
+    resolve_initial_radius,
     validate_formation,
     validated_parameters,
-    resolve_initial_radius,
 )
 
 

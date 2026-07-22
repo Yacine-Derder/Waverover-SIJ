@@ -76,6 +76,113 @@ def _simultaneous_segment_distance(first_start, first_end,
     return math.hypot(*delta), fraction
 
 
+def repair_outgoing_endpoints(proposed, active, geofence,
+                              preferred_separation, max_iterations,
+                              objective_revision=0):
+    """Deterministically move only outgoing endpoints around fixed actives."""
+    original = {
+        str(key): (float(value[0]), float(value[1]))
+        for key, value in proposed.items()
+    }
+    points = {
+        key: (
+            min(max(point[0], geofence.x_min), geofence.x_max),
+            min(max(point[1], geofence.y_min), geofence.y_max),
+        )
+        for key, point in original.items()
+    }
+    fixed = {
+        'active:' + str(key): (float(value[0]), float(value[1]))
+        for key, value in active.items() if value is not None
+    }
+    before = _minimum({**points, **fixed})
+    conflicts = {key: set() for key in points}
+    iterations = 0
+    for iteration in range(max_iterations):
+        iterations = iteration + 1
+        combined = {**points, **fixed}
+        pairs = list(combinations(sorted(combined), 2))
+        if pairs:
+            offset = int(objective_revision) % len(pairs)
+            pairs = pairs[offset:] + pairs[:offset]
+        changed = False
+        for first, second in pairs:
+            first_robot = first.removeprefix('active:')
+            second_robot = second.removeprefix('active:')
+            if first.startswith('active:') and first_robot == second:
+                continue
+            if second.startswith('active:') and second_robot == first:
+                continue
+            distance = math.dist(combined[first], combined[second])
+            deficit = preferred_separation - distance
+            if deficit <= 1e-9:
+                continue
+            movable_first = first in points
+            movable_second = second in points
+            if not movable_first and not movable_second:
+                continue
+            if distance <= 1e-12:
+                nx, ny = _direction(first, second, objective_revision)
+            else:
+                nx = (combined[first][0] - combined[second][0]) / distance
+                ny = (combined[first][1] - combined[second][1]) / distance
+            if movable_first:
+                share = 0.5 if movable_second else 1.0
+                candidate = (
+                    points[first][0] + nx * deficit * share,
+                    points[first][1] + ny * deficit * share,
+                )
+                points[first] = (
+                    min(max(candidate[0], geofence.x_min), geofence.x_max),
+                    min(max(candidate[1], geofence.y_min), geofence.y_max),
+                )
+                conflicts[first].add(second_robot)
+            if movable_second:
+                share = 0.5 if movable_first else 1.0
+                candidate = (
+                    points[second][0] - nx * deficit * share,
+                    points[second][1] - ny * deficit * share,
+                )
+                points[second] = (
+                    min(max(candidate[0], geofence.x_min), geofence.x_max),
+                    min(max(candidate[1], geofence.y_min), geofence.y_max),
+                )
+                conflicts[second].add(first_robot)
+            combined = {**points, **fixed}
+            changed = True
+        residual = max(
+            0.0,
+            preferred_separation - _minimum({**points, **fixed}),
+        )
+        if not changed or residual <= 1e-9:
+            break
+    after = _minimum({**points, **fixed})
+    residual = max(0.0, preferred_separation - after)
+    return points, RepairReport(
+        entries={
+            robot_id: {
+                'original_waypoint': original[robot_id],
+                'snapped_waypoint': original[robot_id],
+                'repaired_waypoint': points[robot_id],
+                'displacement_m': math.dist(
+                    original[robot_id], points[robot_id]
+                ),
+                'connectivity_displacement_m': 0.0,
+                'collision_repair_displacement_m': math.dist(
+                    original[robot_id], points[robot_id]
+                ),
+                'conflicting_robot_ids': tuple(sorted(conflicts[robot_id])),
+            }
+            for robot_id in sorted(points)
+        },
+        iterations=iterations,
+        preferred_separation_before_m=before,
+        preferred_separation_after_m=after,
+        residual_violation_m=residual,
+        least_violating_fallback=residual > 1e-9,
+    )
+
+
 def repair_waypoints(proposed, active, geofence, preferred_separation,
                      max_iterations, target_epoch=0, *, current_positions=None,
                      connectivity_constraints=None, maximum_step_m=None):
@@ -236,7 +343,7 @@ def repair_waypoints(proposed, active, geofence, preferred_separation,
         if residual < best_residual:
             best_residual = residual
             best = dict(points)
-        if not changed or residual <= 1e-6:
+        if not changed or residual <= 1e-9:
             break
 
     points = best
@@ -286,8 +393,8 @@ def repair_waypoints(proposed, active, geofence, preferred_separation,
         preferred_separation_after_m=after,
         residual_violation_m=residual,
         least_violating_fallback=(
-            residual > 1e-6 or maximum_link_violation > 1e-6
-            or segment_residual > 1e-6
+            residual > 1e-9 or maximum_link_violation > 1e-9
+            or segment_residual > 1e-9
         ),
         connectivity_edges=tuple(sorted({
             tuple(sorted((robot_id, str(neighbor_id))))

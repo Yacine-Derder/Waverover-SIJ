@@ -1,11 +1,14 @@
 from pathlib import Path
 
 import pytest
-import yaml
 
 from waverover_swarm_controller.config import (
     ConfigError, load_experiment, SUPPORTED_ALGORITHMS,
 )
+from waverover_swarm_controller.controllers.base import (
+    controller_schedule, ControllerSchedule,
+)
+import yaml
 
 
 def example_path():
@@ -40,13 +43,15 @@ def test_calibrated_defaults_and_pc_robot_ids():
         pytest.approx(0.30)
     )
     assert config.target_dynamics.switch_period_sec == pytest.approx(20.0)
-    assert config.safety.dry_run
+    assert not config.safety.dry_run
     assert config.safety.preferred_separation_m == pytest.approx(0.5)
     assert config.synthetic_mcs.mode == 'random_walk'
     assert config.synthetic_mcs.formation_coupling == 'independent'
     assert config.synthetic_mcs.connectivity_policy == 'observe'
     assert config.synthetic_mcs.initial_radius_m == pytest.approx(1.0)
     assert config.recording.profile == 'core'
+    assert config.recording.pose_source == 'mcs'
+    assert not config.recording.start_synthetic
     assert config.analysis.connectivity_alpha == pytest.approx(5.0)
 
 
@@ -154,6 +159,12 @@ def test_every_algorithm_uses_the_same_canonical_file(algorithm):
     assert config.controller.algorithm == algorithm
     assert config.algorithm_source == 'cli'
     assert config.safety.minimum_separation_m == pytest.approx(0.5)
+    expected = (
+        ControllerSchedule.RECEDING_HORIZON
+        if algorithm.startswith('mpc_')
+        else ControllerSchedule.FINAL_DESTINATION
+    )
+    assert controller_schedule(config.controller.algorithm) is expected
 
 
 def test_selected_algorithm_block_isolated_and_schema_is_strict(tmp_path):
@@ -177,6 +188,18 @@ def test_selected_algorithm_block_isolated_and_schema_is_strict(tmp_path):
     path.write_text(yaml.safe_dump(source), encoding='utf-8')
     with pytest.raises(ConfigError, match='unknown parameter'):
         load_experiment(path)
+
+
+def test_convex_rejects_stale_mpc_step_parameter(tmp_path):
+    source = yaml.safe_load(example_path().read_text(encoding='utf-8'))
+    source['targets_file'] = str(
+        Path(__file__).parents[1] / 'config' / 'targets.yaml'
+    )
+    source['controller']['algorithms']['convex']['mpc_max_step_m'] = 0.1
+    path = tmp_path / 'stale-convex.yaml'
+    path.write_text(yaml.safe_dump(source), encoding='utf-8')
+    with pytest.raises(ConfigError, match='mpc_max_step_m'):
+        load_experiment(path, algorithm_override='convex')
 
 
 def test_missing_selected_parameter_and_unknown_top_level_rejected(tmp_path):

@@ -1,7 +1,7 @@
 """Common interface and helpers for pure swarm controllers."""
 
 from abc import ABC, abstractmethod
-from dataclasses import asdict, replace
+from enum import Enum
 import importlib.util
 import math
 
@@ -12,6 +12,43 @@ class ControllerUnavailableError(RuntimeError):
 
 class InvalidControllerResult(RuntimeError):
     """Raised when a controller generates an unsafe numeric result."""
+
+
+class ControllerSchedule(Enum):
+    """Authoritative controller output meaning and recomputation policy."""
+
+    FINAL_DESTINATION = 'final_destination_event_driven'
+    RECEDING_HORIZON = 'receding_horizon_periodic'
+
+
+CONTROLLER_SCHEDULES = {
+    'heuristic': ControllerSchedule.FINAL_DESTINATION,
+    'heuristic_decentralized': ControllerSchedule.FINAL_DESTINATION,
+    'convex': ControllerSchedule.FINAL_DESTINATION,
+    'mpc_centralized': ControllerSchedule.RECEDING_HORIZON,
+    'mpc_distributed': ControllerSchedule.RECEDING_HORIZON,
+}
+CONTROLLER_OUTCOME_MODES = {
+    'heuristic': None,
+    'heuristic_decentralized': None,
+    'convex': ('normal_convex', 'recovery_convex'),
+    'mpc_centralized': ('normal_mpc', 'recovery_mpc'),
+    'mpc_distributed': ('normal_mpc', 'recovery_mpc'),
+}
+
+
+def controller_schedule(algorithm):
+    try:
+        return CONTROLLER_SCHEDULES[str(algorithm)]
+    except KeyError as error:
+        raise ControllerUnavailableError(
+            'Unknown controller %s.' % algorithm
+        ) from error
+
+
+def controller_outcome_modes(algorithm):
+    controller_schedule(algorithm)
+    return CONTROLLER_OUTCOME_MODES[str(algorithm)]
 
 
 class SwarmController(ABC):
@@ -109,7 +146,11 @@ def deterministic_connectivity_setpoints(config, snapshot, edges):
             _, dx, dy, norm = max(
                 corrections, key=lambda value: (value[3], value[0])
             )
-        travel = min(config.controller.mpc_max_step_m, norm)
+        travel = (
+            min(config.controller.mpc_max_step_m, norm)
+            if controller_schedule(config.controller.algorithm)
+            is ControllerSchedule.RECEDING_HORIZON else norm
+        )
         output[robot_id] = (
             positions[robot_id][0] + travel * dx / norm,
             positions[robot_id][1] + travel * dy / norm,
@@ -141,63 +182,6 @@ def replace_first_future_points(predicted_paths, setpoints):
             points[1] = tuple(float(value) for value in setpoints[robot_id])
         output[robot_id] = tuple(points)
     return output
-
-
-def repair_controller_result(config, snapshot, result, active=None):
-    """Apply one deterministic bounded post-processing policy."""
-    from ..waypoint_repair import repair_waypoints
-
-    algorithm = config.controller.algorithm
-    connectivity = {}
-    if algorithm in (
-        'heuristic', 'heuristic_decentralized', 'convex',
-        'mpc_centralized', 'mpc_distributed',
-    ):
-        station_id = snapshot.station.station_id
-        maximum_link = (
-            heuristic_snap_link_limit(config)
-            if algorithm in ('heuristic', 'heuristic_decentralized')
-            else optimization_hard_link_limit(config)
-        )
-        for first, second in sorted(result.selected_edges):
-            for robot_id, neighbor_id in ((first, second), (second, first)):
-                if robot_id not in snapshot.robots:
-                    continue
-                center = (
-                    snapshot.station.position if neighbor_id == station_id
-                    else snapshot.robots[neighbor_id].position
-                )
-                connectivity.setdefault(robot_id, []).append(
-                    (neighbor_id, center, maximum_link)
-                )
-    maximum_step = (
-        config.controller.mpc_max_step_m
-        if algorithm in ('convex', 'mpc_centralized', 'mpc_distributed')
-        else None
-    )
-    repaired, report = repair_waypoints(
-        result.setpoints,
-        active or {},
-        config.safety.geofence,
-        config.safety.preferred_separation_m,
-        config.safety.collision_repair_max_iterations,
-        snapshot.target_epoch,
-        current_positions={
-            key: state.position for key, state in snapshot.robots.items()
-        },
-        connectivity_constraints=connectivity,
-        maximum_step_m=maximum_step,
-    )
-    metadata = asdict(report)
-    metadata['predicted_paths_after_first_step'] = 'pre_repair'
-    return replace(
-        result,
-        setpoints=repaired,
-        predicted_paths=replace_first_future_points(
-            result.predicted_paths, repaired
-        ),
-        collision_repair=metadata,
-    )
 
 
 def controller_from_config(config):

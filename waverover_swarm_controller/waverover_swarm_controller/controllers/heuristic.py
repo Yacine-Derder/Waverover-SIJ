@@ -5,8 +5,8 @@ import time
 
 import numpy as np
 
-from ..models import ControllerResult
 from .base import ControllerUnavailableError, SwarmController
+from ..models import ControllerResult
 
 
 STATION_ENDPOINT_TOLERANCE_M = 1e-9
@@ -185,7 +185,7 @@ class HeuristicController(SwarmController):
         return output
 
     def _selected_edges(self, snapshot, setpoints):
-        remaining = set(sorted(setpoints))
+        remaining = set(setpoints)
         connected = {snapshot.station.station_id: snapshot.station.position}
         edges = []
         while remaining:

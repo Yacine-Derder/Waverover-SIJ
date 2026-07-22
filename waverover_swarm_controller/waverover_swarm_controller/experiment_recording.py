@@ -5,9 +5,8 @@ import os
 from pathlib import Path
 import secrets
 
-import yaml
-
 from waverover.stack_config import mcs_pose_topic, robot_namespace, robot_topic
+import yaml
 
 
 MANIFEST_SCHEMA_VERSION = 2

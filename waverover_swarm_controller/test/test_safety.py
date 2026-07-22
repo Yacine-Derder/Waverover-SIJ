@@ -46,7 +46,7 @@ def test_missing_output_stale_result_and_geofence_stop(example_config, snapshot)
         )
 
 
-def test_current_separation_error_names_deterministically_ordered_ids(
+def test_current_pose_separation_is_not_shared_command_validation(
     example_config, snapshot
 ):
     close_snapshot = replace(
@@ -56,16 +56,12 @@ def test_current_separation_error_names_deterministically_ordered_ids(
             'robot_10': replace(snapshot.robots['robot_10'], x=0.26, y=0.1),
         },
     )
-    events = validate_controller_result(
+    assert validate_controller_result(
         example_config, close_snapshot, safe_result(close_snapshot), 10.1
-    )
-    assert events[0] == {
-        'kind': 'current', 'pair': ('robot_10', 'robot_2'),
-        'distance_m': pytest.approx(0.01),
-    }
+    ) is True
 
 
-def test_immediate_separation_error_names_deterministically_ordered_ids(
+def test_candidate_endpoint_separation_waits_for_activation_boundary(
     example_config, snapshot
 ):
     points = {
@@ -73,15 +69,13 @@ def test_immediate_separation_error_names_deterministically_ordered_ids(
         'robot_2': (1.01, 1.0),
         'robot_10': (1.0, 1.0),
     }
-    events = validate_controller_result(
+    assert validate_controller_result(
         example_config, snapshot,
         ControllerResult(setpoints=points, created_at=10.0), 10.1,
-    )
-    assert events[0]['kind'] == 'proposed'
-    assert events[0]['pair'] == ('robot_10', 'robot_2')
+    ) is True
 
 
-def test_predicted_separation_error_names_ids_and_path_step(
+def test_unsent_future_path_separation_is_not_shared_validation(
     example_config, snapshot
 ):
     collision_points = {
@@ -94,17 +88,13 @@ def test_predicted_separation_error_names_ids_and_path_step(
         key: (state.position, state.position, collision_points[key])
         for key, state in snapshot.robots.items()
     }
-    events = validate_controller_result(
+    assert validate_controller_result(
         example_config, snapshot,
         ControllerResult(
             setpoints={key: state.position for key, state in snapshot.robots.items()},
             predicted_paths=paths, created_at=10.0,
         ), 10.1,
-    )
-    assert any(
-        event['kind'] == 'predicted' and event.get('step') == 2
-        for event in events
-    )
+    ) is True
 
 
 def test_predicted_first_future_point_must_match_setpoint(
@@ -114,9 +104,15 @@ def test_predicted_first_future_point_must_match_setpoint(
         key: (state.position, (state.x + 0.01, state.y))
         for key, state in snapshot.robots.items()
     }
+    mpc_config = replace(
+        example_config,
+        controller=replace(
+            example_config.controller, algorithm='mpc_centralized'
+        ),
+    )
     with pytest.raises(SafetyViolation, match='step 1.*does not match'):
         validate_controller_result(
-            example_config,
+            mpc_config,
             snapshot,
             ControllerResult(
                 setpoints={

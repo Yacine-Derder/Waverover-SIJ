@@ -1,10 +1,11 @@
 # WaveRover swarm controller (operator PC only)
 
-The default target switch period is 20 seconds. Real dispatch treats 0.5 m
-separation as a best-effort preference and sends every algorithm through the
-same deterministic, geofence-aware repair stage. Collision warnings and
-residual violations are telemetry, not trial-latching faults; structural
-validation remains fail-closed. Exact acknowledgements enable same-epoch
+The default target switch period is 20 seconds. Every newly activated command
+set must have endpoint separation of at least 0.5 m. A deterministic,
+geofence-bounded endpoint correction is attempted at activation; if that
+cannot satisfy the limit, none of the conflicting new commands is published.
+This is a waypoint-endpoint guarantee, not continuous path collision
+avoidance. Exact acknowledgements enable same-epoch
 completed-destination hysteresis (0.05 m match, 0.30 m drift reissue), while
 exact `waypoint_failed` messages clear only the affected rover non-fatally.
 
@@ -58,9 +59,9 @@ Five controllers were ported from `Yacine-Derder/drone-simulator-master`:
 - `heuristic_decentralized`: PC-hosted target-aware agents with a distinct
   per-agent computation boundary and local relay-chain decisions. It does not
   add ROS traffic between agents yet.
-- `convex`: centralized target assignment and position optimization with a
-  tested connectivity-safe output projection equivalent to the simulator's
-  `ConnectedDrone` carrot restriction.
+- `convex`: centralized static target assignment and final-position
+  optimization. Its output is the final solution, with no MPC horizon or
+  per-cycle movement bound.
 - `mpc_centralized`: the centralized convex problem over a configurable
   horizon; only the first future carrot is returned to the dispatcher.
 - `mpc_distributed`: local per-agent solvers, Fiedler-vector edge selection,
@@ -82,6 +83,23 @@ Recovery connectivity slack is penalized by
 `controller.connectivity_recovery_slack_penalty` (default `10000.0`). The
 penalty is configurable without changing the hard communication radius.
 
+Controller output and scheduling have one authoritative classification:
+
+| Controller | Output | Computation schedule |
+| --- | --- | --- |
+| `heuristic` | final destinations | startup and mission-objective change |
+| `heuristic_decentralized` | final destinations | startup and mission-objective change |
+| `convex` | static optimized final destinations | startup and mission-objective change |
+| `mpc_centralized` | first future MPC step | every control period |
+| `mpc_distributed` | first future MPC step | every control period |
+
+The semantic objective identity includes station ID/position, priority target
+selection, and sorted target IDs, positions, weights, and priority flags. Pose
+and timestamp changes and mapping order are deliberately excluded. Therefore
+the three static controllers retain one final destination set while rovers
+move; a genuine objective change creates exactly one new revision. MPC retains
+periodic replanning at `controller.common.control_period_sec`.
+
 The three optimization controllers use a never-fail hierarchy: normal solve,
 connectivity-slack recovery solve, deterministic connectivity recovery, then
 measured-position safe hold. A failed or undispatchable hold is diagnosed but
@@ -93,16 +111,21 @@ Convex and MPC connectivity constraints use exactly
 selected edge and prediction step and minimizes their configured penalty
 before nominal target/link effort. Deterministic recovery combines every
 violated selected-edge direction from the same immutable snapshot and clips
-each rover's combined displacement to `mpc_max_step_m`. It reuses solver edges
-and constructs a station-rooted replacement only when none are usable.
+each rover's combined displacement to `mpc_max_step_m` only for receding-horizon
+MPC. Static convex recovery returns its full corrected destination. Recovery
+reuses solver edges and constructs a station-rooted replacement only when none
+are usable.
 
-Post-processing has one owner (the coordinator): it checks a complete finite
-mapping, applies bounded geofence/connectivity/movement projections, repairs
-first-step crossings and endpoint/active-waypoint separation, reconciles those
-constraints for a bounded number of iterations, then performs independent
-final validation. Movement projection is last in each reconciliation pass, so
-the physical step is never exceeded; any link or separation constraint that
-cannot simultaneously be met is reported rather than silently hidden.
+Shared controller-result validation checks complete, finite, geofenced command
+mappings and controller-specific path structure. It does not use measured
+poses as collision obstacles, construct straight-line motion segments, or
+repair pending results. The dispatcher owns endpoint separation at the exact
+activation boundary. For an initial batch it checks all outgoing endpoints
+together; for a partial handoff it combines new endpoints with unchanged
+active endpoints and moves only the new endpoints. The same inputs produce the
+same bounded correction. A residual violation produces
+`outgoing_waypoint_separation_failed`, publishes none of the conflicting batch,
+and exposes a non-dispatching safe-hold outcome.
 
 Every cycle produces a structured execution outcome. Pending updates and
 dispatcher ticks require `dispatch_allowed`, a complete command set, and final
@@ -110,40 +133,18 @@ validation simultaneously. Temporary missing/stale pose snapshots produce
 `pose_unavailable`, preserve existing active commands without refreshing them,
 and automatically retry on the next cycle.
 
-### Conservative optimization separation model
+### Endpoint separation and MPC predictions
 
-All optimization controllers constrain every unordered rover pair at every
-future prediction step, independently of the communication edges. Centralized
-convex and centralized MPC fix a separating-plane normal from the measured
-current positions, `n_ij = (p_i - p_j) / ||p_i - p_j||`, and impose
-`n_ij.T @ (x_i(k) - x_j(k)) >= minimum_separation + 0.001 m`. This is affine
-and therefore remains compatible with CVXPY disciplined convex programming.
-The superficially direct constraint
-`norm(x_i(k) - x_j(k)) >= minimum_separation` is not used: a convex norm on
-the greater-than side makes the feasible set non-convex and violates DCP.
-
-Distributed MPC uses the same fixed current-position directions but divides
-the available projected closing distance equally between both agents. Each
-agent may consume at most
-`(||p_i-p_j|| - minimum_separation - 0.001 m) / 2` toward the other rover at
-each future step. Both agents applying their corresponding half-budget means
-simultaneous motion cannot consume more than the available projected margin.
-Fiedler edges remain communication/connectivity constraints only; collision
-limits cover all rover pairs. Coincident rovers, initially unsafe centralized
-pairs, and negative distributed closing budgets fail explicitly because there
-is no safe direction or margin to infer.
-
-The fixed separating directions are conservative. In particular, longer MPC
-horizons cannot plan a side-switch around another rover even when a nonlinear
-collision-free route exists. First-waypoint connectivity/lookahead
-post-processing is copied into prediction index 1 so safety, visualization,
-and dispatch use the same point; later optimized points are left unchanged,
-which can make the first path segment less representative of the optimizer's
-original dynamics. The independent post-solve safety validator remains
-authoritative and fails closed on any current, immediate, or predicted-path
-violation. Solver metadata from a rejected result may be shown in diagnostics
-as `controller_result_state=rejected`, but that result is never made
-commandable or published as a valid prediction.
+The shared separation rule applies only to the prospective active endpoint
+map. Current poses, straight-line path crossings, and later unsent MPC horizon
+states are outside that rule. Horizon-wide pairwise separation constraints
+that belonged to the former generic collision feature were removed from both
+MPC formulations; communication/connectivity constraints and model dynamics
+remain. Predicted paths are still published as unmodified solver diagnostics.
+If activation correction changes the optimized first step, telemetry records
+both `optimized_setpoints` and `dispatched_waypoints` plus the repair report.
+Neither endpoint separation nor discrete predictions establish continuous-time
+physical collision avoidance.
 
 These controllers remain first-draft, position-level convex approximations.
 They are not the complete nonlinear fixed-wing formulation described by the
@@ -693,7 +694,8 @@ physical experiment. SQLite3 is the default storage plugin.
 
 Every completed coordinator cycle publishes canonical schema-versioned JSON on
 `/waverover_swarm/controller_telemetry`. It contains measured poses/headings,
-station and targets, setpoints, active/pending waypoints, predicted paths,
+station and targets, optimized setpoints, actually dispatched and pending
+waypoints, objective revision and computation reason/count, predicted paths,
 selected edges, explicit target assignments when the algorithm has them,
 solver state/timing, valid/rejected/faulted state, dry-run and command-enabled
 state, per-rover active/publication age, monotonic last-publication time,
@@ -761,7 +763,7 @@ ros2 run waverover_swarm_controller replay_run <run-directory> \
 
 Replay renders the arena/geofence, station, weighted targets, every rover with
 its own recorded heading,
-recent trails, generated/active/pending points, predicted paths, selected
+recent trails, optimized/dispatched/pending points, predicted paths, selected
 edges, the actual range graph with quality colors, optional communication and
 minimum-separation circles, connectivity, solver/stop state, and elapsed and
 remaining time. Controls provide play/pause, seek, step, 0.25x–4x speed, and
@@ -770,16 +772,19 @@ continuous path through ±pi.
 
 ## FIFO-safe dispatch and stopping
 
-Each controller cycle only replaces the latest PC-side pending point. A point
-is published when no active waypoint exists, or after MCS shows the active
-point within `0.15 m` continuously through the `0.15 s` handoff delay. The
-active point is also republished unchanged every `refresh_period_sec`, using
-monotonic scheduling. A refresh does not change active age, reached state,
-pending state, or safety state. The onboard controller suppresses consecutive
-coordinate-equivalent messages while the target is queued, but accepts that
-coordinate again after the reached target has been removed. The handoff delay
-lets the onboard 10 Hz FIFO controller remove the reached point. MPC
-paths are never published as waypoint sequences. A carrot shorter than
+Only the newest PC-side pending point and objective revision are retained for
+each rover; a stale revision cannot replace or later promote over a newer one.
+A point is published when no active waypoint exists or after an exact onboard
+frame/token/coordinate acknowledgement clears the active point. Promotion is
+revalidated against the prospective active endpoint set, so acknowledgement
+callbacks cannot bypass separation. The existing policy waits for that
+acknowledgement and does not preempt an active rover command on objective
+change.
+
+The active point is republished unchanged every `refresh_period_sec`, using
+the identical coordinates and token. Refresh does not invoke a controller,
+create a logical command, or change active age, pending state, or safety state.
+MPC paths are never published as waypoint sequences. A carrot shorter than
 `0.30 m` is extended in its finite nonzero direction, up to the `0.333333 m`
 step limit; a zero direction produces a measured-position hold.
 

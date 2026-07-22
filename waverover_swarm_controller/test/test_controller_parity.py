@@ -4,13 +4,12 @@ import math
 import pytest
 
 from waverover_swarm_controller.controllers import controller_from_config
-from waverover_swarm_controller.controllers.base import repair_controller_result
 from waverover_swarm_controller.controllers.heuristic import HeuristicController
 from waverover_swarm_controller.controllers.heuristic_decentralized import (
     DecentralizedHeuristicController,
 )
 from waverover_swarm_controller.models import (
-    ControllerResult, RobotState, SwarmSnapshot, TargetState,
+    RobotState, SwarmSnapshot, TargetState,
 )
 
 
@@ -74,9 +73,8 @@ def test_central_heuristic_matches_small_reference_chain(
         tuple(round(value, 6) for value in point)
         for point in result.setpoints.values()
     }
-    # Two main-target relay slots remain, while the surplus rover holds its
-    # measured position instead of duplicating the fixed station endpoint.
-    assert {(1.25, 0.0), (2.5, 0.0)} <= rounded
+    # The configured 1.5 m radio range requires three final relay slots.
+    assert {(0.833333, 0.0), (1.666667, 0.0), (2.5, 0.0)} <= rounded
     assert (0.0, 0.0) not in rounded
 
 
@@ -131,40 +129,6 @@ def test_distributed_mpc_allocates_weighted_targets_across_collinear_team(
     reordered = controller_from_config(config).compute(permuted)
     assert reordered.setpoints == result.setpoints
     assert reordered.controller_diagnostics == result.controller_diagnostics
-
-
-@pytest.mark.parametrize('algorithm', ['heuristic', 'heuristic_decentralized'])
-def test_heuristic_outputs_are_snapped_to_selected_connectivity_links(
-    algorithm, example_config, snapshot
-):
-    config = with_algorithm(example_config, algorithm)
-    one_robot = {'r1': RobotState('r1', 0.5, 0.0, 0.0, snapshot.created_at)}
-    selected = replace(
-        snapshot,
-        robots=one_robot,
-        targets={'far': TargetState('far', 4.0, 0.0, 10.0, is_main=True)},
-    )
-
-    controller = controller_from_config(config)
-    controller.compute = lambda chosen: ControllerResult(
-        setpoints={'r1': (4.0, 0.0)},
-        selected_edges=((chosen.station.station_id, 'r1'),),
-        created_at=chosen.created_at,
-        target_epoch=chosen.target_epoch,
-    )
-    result = repair_controller_result(
-        config, selected, controller.compute(selected)
-    )
-    report = result.collision_repair
-    allowed = (
-        config.communication.maximum_range_m - config.vehicle.turn_radius_m
-    )
-
-    assert report['connectivity_edges']
-    assert math.dist(result.setpoints['r1'], snapshot.station.position) <= allowed + 1e-6
-    assert report['entries']['r1']['original_waypoint'] != result.setpoints['r1']
-    assert report['entries']['r1']['snapped_waypoint'] == result.setpoints['r1']
-    assert report['maximum_link_violation_m'] <= 1e-6
 
 
 @pytest.mark.parametrize(

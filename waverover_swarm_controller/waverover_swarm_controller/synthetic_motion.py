@@ -585,9 +585,7 @@ class SyntheticTrajectory:
             return dict(validation)
         if not hasattr(validation, '__dataclass_fields__'):
             return validation
-        return {
-            key: value for key, value in asdict(validation).items()
-        }
+        return dict(asdict(validation))
 
     def metadata(self):
         true = self._validation_metadata(self.last_true_validation)

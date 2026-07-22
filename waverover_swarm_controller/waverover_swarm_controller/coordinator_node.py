@@ -1,6 +1,6 @@
 """ROS boundary for the operator-PC swarm coordinator."""
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 import json
 import math
 import signal
@@ -22,10 +22,12 @@ from .config import ConfigError, load_experiment
 from .controllers import controller_from_config
 from .controllers.base import (
     complete_finite_mapping,
+    controller_outcome_modes,
+    controller_schedule,
+    ControllerSchedule,
     ControllerUnavailableError,
     deterministic_connectivity_setpoints,
     optimization_hard_link_limit,
-    repair_controller_result,
 )
 from .metrics import algebraic_connectivity, minimum_pairwise_distance
 from .models import ControllerExecutionOutcome, ControllerResult
@@ -60,7 +62,8 @@ class SwarmCoordinator(Node):
             start_time=time.monotonic(),
         )
         self.dispatcher = WaypointDispatcher(
-            self.config.robot_ids, self.config.waypoint_dispatch
+            self.config.robot_ids, self.config.waypoint_dispatch,
+            self.config.safety,
         )
         self.aggregator = PoseAggregator(
             self.config.robot_ids,
@@ -83,6 +86,10 @@ class SwarmCoordinator(Node):
         self.fallback_counters = {}
         self.latest_execution_outcome = None
         self._last_controller_mode = None
+        self._last_objective_signature = None
+        self._objective_revision = 0
+        self._last_compute_reason = 'not_computed'
+        self._controller_compute_count = 0
 
         # The PC intentionally loads fleet naming without rover-local identity.
         from waverover.stack_config import (
@@ -233,6 +240,45 @@ class SwarmCoordinator(Node):
             'message': str(error),
         }
 
+    @staticmethod
+    def _mission_objective_signature(snapshot):
+        """Return deterministic semantic inputs used by static controllers."""
+        return (
+            (
+                snapshot.station.station_id,
+                float(snapshot.station.x),
+                float(snapshot.station.y),
+            ),
+            snapshot.priority_target_id,
+            tuple(
+                (
+                    target_id,
+                    float(target.x),
+                    float(target.y),
+                    float(target.weight),
+                    bool(target.is_priority),
+                )
+                for target_id, target in sorted(snapshot.targets.items())
+            ),
+        )
+
+    def _computation_reason(self, snapshot):
+        signature = SwarmCoordinator._mission_objective_signature(snapshot)
+        schedule = controller_schedule(self.config.controller.algorithm)
+        if getattr(self, '_last_objective_signature', None) is None:
+            self._last_objective_signature = signature
+            self._objective_revision = 1
+            return 'startup'
+        if signature != self._last_objective_signature:
+            self._last_objective_signature = signature
+            self._objective_revision = getattr(
+                self, '_objective_revision', 0
+            ) + 1
+            return 'mission_objective_changed'
+        if schedule is ControllerSchedule.RECEDING_HORIZON:
+            return 'periodic_mpc'
+        return None
+
     def _finish_outcome(self, result, dispatch_allowed, complete, validated,
                         mode, failures):
         # Keep outcome reporting best-effort: it must never replace the
@@ -310,11 +356,6 @@ class SwarmCoordinator(Node):
                 raise SafetyViolation(
                     '%s must be finite and nonnegative.' % field
                 )
-        result = SwarmCoordinator._repair_result(self, snapshot, result)
-        if not complete_finite_mapping(snapshot, result):
-            raise SafetyViolation(
-                'Repaired controller candidate is incomplete or non-finite.'
-            )
         collision_validation = validate_controller_result(
             self.config, snapshot, result, time.monotonic()
         )
@@ -324,10 +365,8 @@ class SwarmCoordinator(Node):
         return result
 
     def _compute_valid_result(self, snapshot):
-        optimization = self.config.controller.algorithm in (
-            'convex', 'mpc_centralized', 'mpc_distributed'
-        )
-        if not optimization:
+        modes = controller_outcome_modes(self.config.controller.algorithm)
+        if modes is None:
             result = SwarmCoordinator._process_candidate(
                 self, snapshot, self.controller.compute(snapshot)
             )
@@ -336,16 +375,7 @@ class SwarmCoordinator(Node):
                 result, True, True, True,
                 self.config.controller.algorithm, {},
             )
-        normal_mode = (
-            'normal_convex'
-            if self.config.controller.algorithm == 'convex'
-            else 'normal_mpc'
-        )
-        recovery_mode = (
-            'recovery_convex'
-            if self.config.controller.algorithm == 'convex'
-            else 'recovery_mpc'
-        )
+        normal_mode, recovery_mode = modes
         attempts = [(normal_mode, self.controller.compute)]
         recovery = getattr(self.controller, 'compute_recovery', None)
         if recovery is not None:
@@ -510,36 +540,6 @@ class SwarmCoordinator(Node):
                 failures,
             )
 
-    def _repair_result(self, snapshot, result):
-        active = {
-            robot_id: state.active_waypoint
-            for robot_id, state in getattr(
-                self.dispatcher, 'states', {}
-            ).items()
-            if state.active_waypoint is not None
-        }
-        output = repair_controller_result(
-            self.config, snapshot, result, active=active
-        )
-        metadata = dict(output.collision_repair)
-        metadata['controller_output_repair'] = dict(result.collision_repair)
-        metadata['collision_events'] = tuple(getattr(
-            self, 'latest_collision_events', ()
-        ))
-        metadata['predicted_paths_after_first_step'] = 'pre_repair'
-        if metadata['residual_violation_m'] > 1e-6:
-            logger = self.get_logger() if hasattr(self, 'get_logger') else None
-            if logger is not None:
-                logger.warn(
-                    'Best-effort waypoint separation has %.3f m residual; '
-                    'continuing with finite geofence-valid least-violating '
-                    'output.' % metadata['residual_violation_m']
-                )
-        return replace(
-            output,
-            collision_repair=metadata,
-        )
-
     def _control_cycle(self):
         try:
             snapshot = self._snapshot()
@@ -555,8 +555,22 @@ class SwarmCoordinator(Node):
             )
             self._publish_diagnostics()
             return
+        compute_reason = (
+            SwarmCoordinator._computation_reason(self, snapshot)
+            if hasattr(self, 'config') and hasattr(snapshot, 'station')
+            else 'startup'
+        )
         try:
-            outcome = self._compute_valid_result(snapshot)
+            if compute_reason is None:
+                outcome = self.latest_execution_outcome
+                if outcome is None:
+                    raise RuntimeError('Static controller has no cached result.')
+            else:
+                self._last_compute_reason = compute_reason
+                self._controller_compute_count = getattr(
+                    self, '_controller_compute_count', 0
+                ) + 1
+                outcome = self._compute_valid_result(snapshot)
         except (
             SafetyViolation,
             ControllerUnavailableError,
@@ -590,19 +604,45 @@ class SwarmCoordinator(Node):
             self.latest_stop_reason = ''
 
         self.latest_snapshot = snapshot
-        self.latest_result = result
+        if compute_reason is not None:
+            self.latest_result = result
         if (
             not self.dispatcher.faulted
             and outcome.dispatch_allowed
             and outcome.complete_command_set_generated
             and outcome.final_command_set_passed_validation
         ):
-            try:
-                self.dispatcher.update_pending(
-                    result.setpoints, getattr(result, 'target_epoch', 0)
+            if compute_reason is not None:
+                try:
+                    self.dispatcher.update_pending(
+                        result.setpoints,
+                        getattr(result, 'target_epoch', 0),
+                        objective_revision=getattr(
+                            self, '_objective_revision', 0
+                        ),
+                    )
+                except TypeError:  # compatibility with narrow test adapters
+                    self.dispatcher.update_pending(result.setpoints)
+            self._dispatch(snapshot)
+            activation_failure = getattr(
+                self.dispatcher, 'last_activation_failure', ''
+            )
+            if activation_failure:
+                self.latest_stop_reason = activation_failure
+                outcome = SwarmCoordinator._finish_outcome(
+                    self, result, False, True, False,
+                    'non_dispatching_safe_hold',
+                    {
+                        'outgoing_waypoint_separation_failed':
+                        activation_failure,
+                    },
                 )
-            except TypeError:  # compatibility with narrow test/legacy adapters
-                self.dispatcher.update_pending(result.setpoints)
+        elif (
+            not self.dispatcher.faulted
+            and getattr(self.dispatcher, 'last_activation_failure', '')
+        ):
+            # A rejected new endpoint must not interrupt reliable refreshes of
+            # unrelated commands that were already active.
             self._dispatch(snapshot)
         if hasattr(self, '_publish_target_state'):
             self._publish_target_state(snapshot)
@@ -654,6 +694,19 @@ class SwarmCoordinator(Node):
                 robot_id in self.latest_snapshot.robots else None
             ),
         )
+        activation_failure = getattr(
+            self.dispatcher, 'last_activation_failure', ''
+        )
+        if activation_failure:
+            self.latest_stop_reason = activation_failure
+            SwarmCoordinator._finish_outcome(
+                self, self.latest_result, False, True, False,
+                'non_dispatching_safe_hold',
+                {
+                    'outgoing_waypoint_separation_failed':
+                    activation_failure,
+                },
+            )
         if not actions:
             state = self.dispatcher.states[robot_id]
             if state.last_acknowledged_token != token:
@@ -790,6 +843,13 @@ class SwarmCoordinator(Node):
             'fallback_counters': (
                 dict(outcome.fallback_counters) if outcome else {}
             ),
+            'computation_reason': getattr(
+                self, '_last_compute_reason', 'not_computed'
+            ),
+            'objective_revision': getattr(self, '_objective_revision', 0),
+            'controller_compute_count': getattr(
+                self, '_controller_compute_count', 0
+            ),
         }
         for robot_id, age in ages.items():
             values['pose_age_' + robot_id] = (
@@ -814,6 +874,8 @@ class SwarmCoordinator(Node):
                 'handoff_cause',
                 'active_target_epoch',
                 'pending_target_epoch',
+                'active_objective_revision',
+                'pending_objective_revision',
             ):
                 values[field + '_' + robot_id] = str(dispatch[field])
             health = getattr(self, 'onboard_health', {}).get(robot_id)
@@ -919,6 +981,20 @@ class SwarmCoordinator(Node):
                 dispatch_observability,
                 self.latest_handoff,
                 self.latest_execution_outcome,
+                computation_reason=getattr(
+                    self, '_last_compute_reason', 'not_computed'
+                ),
+                objective_revision=getattr(self, '_objective_revision', 0),
+                controller_compute_count=getattr(
+                    self, '_controller_compute_count', 0
+                ),
+                activation_repair=(
+                    asdict(self.dispatcher.last_activation_report)
+                    if getattr(
+                        self.dispatcher, 'last_activation_report', None
+                    ) is not None
+                    else {}
+                ),
             )
             message = String()
             message.data = canonical_json(payload)

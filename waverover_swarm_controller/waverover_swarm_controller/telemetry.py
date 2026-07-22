@@ -10,7 +10,7 @@ from .metrics import (
 )
 
 
-CONTROLLER_TELEMETRY_SCHEMA_VERSION = 7
+CONTROLLER_TELEMETRY_SCHEMA_VERSION = 8
 
 
 def _point(point):
@@ -55,6 +55,10 @@ def build_controller_telemetry(
     dispatch_observability,
     latest_handoff,
     execution_outcome=None,
+    computation_reason='not_computed',
+    objective_revision=0,
+    controller_compute_count=0,
+    activation_repair=None,
 ):
     robots = {}
     current_points = {}
@@ -108,6 +112,9 @@ def build_controller_telemetry(
                 result.optimization_mode if result is not None else ''
             )
         ),
+        'computation_reason': str(computation_reason),
+        'objective_revision': int(objective_revision),
+        'controller_compute_count': int(controller_compute_count),
         'result_state': str(result_state),
         'commands_enabled': bool(commands_enabled),
         'dry_run': bool(config.safety.dry_run),
@@ -153,6 +160,16 @@ def build_controller_telemetry(
                 for robot_id, point in result.setpoints.items()
             } if result is not None else {}
         ),
+        'optimized_setpoints': (
+            {
+                robot_id: _point(point)
+                for robot_id, point in result.setpoints.items()
+            } if result is not None else {}
+        ),
+        'dispatched_waypoints': {
+            robot_id: None if point is None else _point(point)
+            for robot_id, point in sorted(active_waypoints.items())
+        },
         'active_waypoints': {
             robot_id: None if point is None else _point(point)
             for robot_id, point in sorted(active_waypoints.items())
@@ -224,6 +241,12 @@ def build_controller_telemetry(
                 )),
                 'pending_target_epoch': int(values.get(
                     'pending_target_epoch', 0
+                )),
+                'active_objective_revision': int(values.get(
+                    'active_objective_revision', 0
+                )),
+                'pending_objective_revision': int(values.get(
+                    'pending_objective_revision', 0
                 )),
             }
             for robot_id, values in sorted(dispatch_observability.items())
@@ -308,9 +331,7 @@ def build_controller_telemetry(
         ),
         'collision_policy': config.safety.collision_policy,
         'preferred_separation_m': config.safety.preferred_separation_m,
-        'waypoint_separation_repair': (
-            dict(result.collision_repair) if result is not None else {}
-        ),
+        'waypoint_separation_repair': dict(activation_repair or {}),
         'solve_duration_sec': (
             _finite_or_none(result.solve_duration_sec)
             if result is not None else None

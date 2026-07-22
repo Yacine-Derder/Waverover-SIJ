@@ -66,3 +66,7 @@ class CentralizedMpcController(ConvexController):
     @property
     def horizon_steps(self):
         return self.config.controller.mpc_horizon
+
+    @property
+    def trajectory_step_limit_m(self):
+        return self.config.controller.mpc_max_step_m

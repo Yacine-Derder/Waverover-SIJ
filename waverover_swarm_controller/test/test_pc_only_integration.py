@@ -207,7 +207,10 @@ def test_dry_run_stop_never_publishes_end_trial(example_config, snapshot):
         state.ever_commanded = True
     publishers = {robot_id: Publisher() for robot_id in snapshot.robots}
     coordinator = SimpleNamespace(
-        config=example_config,
+        config=replace(
+            example_config,
+            safety=replace(example_config.safety, dry_run=True),
+        ),
         dispatcher=dispatcher,
         end_trial_publishers=publishers,
         latest_stop_reason='',
@@ -302,7 +305,7 @@ def test_synthetic_launch_exposes_typed_arguments_under_swarm_namespace():
     assert nodes[0]._Node__node_namespace == 'waverover_swarm'
 
 
-def test_safety_rejected_optimization_never_reaches_dispatch_and_recovers(
+def test_static_convex_candidate_is_cached_until_objective_change(
     example_config, snapshot
 ):
     now = time.monotonic()
@@ -388,9 +391,9 @@ def test_safety_rejected_optimization_never_reaches_dispatch_and_recovers(
     SwarmCoordinator._control_cycle(coordinator)
 
     assert coordinator.latest_stop_reason == ''
-    assert coordinator.latest_result.setpoints == valid.setpoints
+    assert coordinator.latest_result.setpoints == rejected.setpoints
     assert coordinator.latest_rejected_result is None
-    assert len(dispatcher.pending_updates) == 2
+    assert len(dispatcher.pending_updates) == 1
     assert counters['dispatch'] == 2
     assert counters['visualization'] == 2
 

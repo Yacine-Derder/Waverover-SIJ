@@ -17,6 +17,7 @@ class DispatchAction:
     reason: str = ''
     token: tuple = None
     target_epoch: int = 0
+    objective_revision: int = 0
 
 
 @dataclass
@@ -26,6 +27,8 @@ class RoverDispatchState:
     active_target_epoch: int = 0
     pending_waypoint: tuple = None
     pending_target_epoch: int = 0
+    active_objective_revision: int = 0
+    pending_objective_revision: int = 0
     active_published_at: float = None
     last_published_at: float = None
     refresh_count: int = 0
@@ -47,8 +50,9 @@ class RoverDispatchState:
 
 
 class WaypointDispatcher:
-    def __init__(self, robot_ids, config):
+    def __init__(self, robot_ids, config, safety_config=None):
         self.config = config
+        self.safety_config = safety_config
         self.states = {
             str(robot_id): RoverDispatchState()
             for robot_id in sorted(robot_ids)
@@ -56,6 +60,9 @@ class WaypointDispatcher:
         self.faulted = False
         self.fault_reason = ''
         self._last_token_ns = 0
+        self.last_activation_failure = ''
+        self.last_activation_report = None
+        self._failed_activation_signature = None
 
     @property
     def commanded_robot_ids(self):
@@ -65,18 +72,31 @@ class WaypointDispatcher:
             if state.ever_commanded
         ))
 
-    def update_pending(self, setpoints, target_epoch=0):
+    def update_pending(self, setpoints, target_epoch=0, objective_revision=None):
+        revision = (
+            int(target_epoch) if objective_revision is None
+            else int(objective_revision)
+        )
+        updated = False
         for robot_id, point in setpoints.items():
             if robot_id not in self.states:
                 raise ValueError('Unknown dispatcher robot %s.' % robot_id)
             state = self.states[robot_id]
-            if int(target_epoch) < state.pending_target_epoch:
+            if revision < max(
+                state.pending_objective_revision,
+                state.active_objective_revision,
+            ):
                 continue
+            updated = True
             state.pending_waypoint = (
                 float(point[0]),
                 float(point[1]),
             )
             state.pending_target_epoch = int(target_epoch)
+            state.pending_objective_revision = revision
+        if updated:
+            self._failed_activation_signature = None
+            self.last_activation_failure = ''
 
     def _publish_pending(self, robot_id, state, now):
         point = state.pending_waypoint
@@ -91,6 +111,7 @@ class WaypointDispatcher:
         candidate = (token_ns // 1000000000, token_ns % 1000000000)
         state.active_token = candidate
         state.active_target_epoch = state.pending_target_epoch
+        state.active_objective_revision = state.pending_objective_revision
         state.pending_waypoint = None
         state.active_published_at = now
         state.last_published_at = now
@@ -101,7 +122,75 @@ class WaypointDispatcher:
         return DispatchAction(
             'waypoint', robot_id, point=point, token=state.active_token,
             target_epoch=state.active_target_epoch,
+            objective_revision=state.active_objective_revision,
         )
+
+    def _activation_signature(self, robot_ids):
+        return (
+            tuple(sorted(
+                (robot_id, self.states[robot_id].pending_waypoint,
+                 self.states[robot_id].pending_objective_revision)
+                for robot_id in robot_ids
+            )),
+            tuple(sorted(
+                (robot_id, state.active_waypoint)
+                for robot_id, state in self.states.items()
+                if state.active_waypoint is not None
+                and robot_id not in robot_ids
+            )),
+        )
+
+    def _activate_pending(self, robot_ids, now):
+        robot_ids = tuple(sorted(
+            robot_id for robot_id in robot_ids
+            if self.states[robot_id].pending_waypoint is not None
+            and self.states[robot_id].active_waypoint is None
+        ))
+        if not robot_ids:
+            return []
+        signature = self._activation_signature(robot_ids)
+        if signature == self._failed_activation_signature:
+            return []
+        if self.safety_config is not None:
+            from .waypoint_repair import repair_outgoing_endpoints
+            proposed = {
+                robot_id: self.states[robot_id].pending_waypoint
+                for robot_id in robot_ids
+            }
+            fixed = {
+                robot_id: state.active_waypoint
+                for robot_id, state in self.states.items()
+                if state.active_waypoint is not None
+                and robot_id not in robot_ids
+            }
+            revision = max(
+                self.states[robot_id].pending_objective_revision
+                for robot_id in robot_ids
+            )
+            corrected, report = repair_outgoing_endpoints(
+                proposed,
+                fixed,
+                self.safety_config.geofence,
+                self.safety_config.minimum_separation_m,
+                self.safety_config.collision_repair_max_iterations,
+                revision,
+            )
+            self.last_activation_report = report
+            if report.residual_violation_m > 1e-9:
+                self.last_activation_failure = (
+                    'outgoing_waypoint_separation_failed: residual %.6f m'
+                    % report.residual_violation_m
+                )
+                self._failed_activation_signature = signature
+                return []
+            for robot_id, point in corrected.items():
+                self.states[robot_id].pending_waypoint = point
+        self.last_activation_failure = ''
+        self._failed_activation_signature = None
+        return [
+            self._publish_pending(robot_id, self.states[robot_id], now)
+            for robot_id in robot_ids
+        ]
 
     def _suppress_repeated(self, state, measured_position):
         point = state.pending_waypoint
@@ -170,7 +259,7 @@ class WaypointDispatcher:
             return []
         if self._drop_suppressed_pending(state, measured_position):
             return []
-        return [self._publish_pending(str(robot_id), state, now)]
+        return self._activate_pending((str(robot_id),), now)
 
     def fail(self, robot_id, frame_id, token, point, now, expected_frame):
         """Exact-match an onboard navigation_stalled notification."""
@@ -208,6 +297,7 @@ class WaypointDispatcher:
         if self.faulted or not commands_enabled:
             return []
         actions = []
+        eligible = []
         for robot_id in sorted(self.states):
             state = self.states[robot_id]
             if state.active_waypoint is None:
@@ -216,7 +306,7 @@ class WaypointDispatcher:
                     position = None if robot is None else robot.position
                     if self._drop_suppressed_pending(state, position):
                         continue
-                    actions.append(self._publish_pending(robot_id, state, now))
+                    eligible.append(robot_id)
                 continue
             if now - state.last_published_at >= self.config.refresh_period_sec:
                 state.last_published_at = now
@@ -224,8 +314,9 @@ class WaypointDispatcher:
                 actions.append(DispatchAction(
                     'refresh', robot_id, point=state.active_waypoint,
                     token=state.active_token, target_epoch=state.active_target_epoch,
+                    objective_revision=state.active_objective_revision,
                 ))
-        return actions
+        return self._activate_pending(eligible, now) + actions
 
     def observability(self, now):
         output = {}
@@ -263,6 +354,8 @@ class WaypointDispatcher:
                 'unmatched_failure_count': state.unmatched_failure_count,
                 'active_target_epoch': state.active_target_epoch,
                 'pending_target_epoch': state.pending_target_epoch,
+                'active_objective_revision': state.active_objective_revision,
+                'pending_objective_revision': state.pending_objective_revision,
                 'active_waypoint_age_sec': active_age,
                 'last_publication_monotonic_sec': state.last_published_at,
                 'last_publication_age_sec': publication_age,

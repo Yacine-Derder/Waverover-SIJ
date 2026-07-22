@@ -13,10 +13,6 @@ from .base import (
     replace_first_future_points,
     SwarmController,
 )
-from .collision_avoidance import (
-    SEPARATION_SLACK_PENALTY,
-    stable_separation_normal,
-)
 from ..models import ControllerResult
 
 
@@ -162,7 +158,6 @@ class DistributedMpcController(SwarmController):
         snapshot,
         edges,
         neighbor_predictions,
-        closing_limits,
     ):
         import cvxpy as cp
         robot = snapshot.robots[robot_id]
@@ -199,14 +194,6 @@ class DistributedMpcController(SwarmController):
                     objective_neighbors.append(closest_fallback)
         objective_neighbors = tuple(sorted(objective_neighbors))
         maximum_link = optimization_hard_link_limit(self.config)
-        separation_neighbors = tuple(
-            key for key in sorted(snapshot.robots) if key != robot_id
-        )
-        separation_slack = cp.Variable(
-            (horizon, len(separation_neighbors)), nonneg=True
-        ) if separation_neighbors else None
-        if separation_slack is not None:
-            objective += SEPARATION_SLACK_PENALTY * cp.sum(separation_slack)
         connectivity_slack = cp.Variable(
             (horizon, len(connected_neighbors)), nonneg=True
         ) if self._recovery_mode and connected_neighbors else None
@@ -234,35 +221,6 @@ class DistributedMpcController(SwarmController):
                         path[step]
                         - np.asarray(snapshot.targets[target_id].position)
                     )
-            for _neighbor_id, normal, closing_budget in closing_limits[robot_id]:
-                displacement = path[step] - np.asarray(robot.position)
-                constraints.append(
-                    normal[0] * displacement[0]
-                    + normal[1] * displacement[1]
-                    >= -closing_budget
-                )
-            for neighbor_index, neighbor_id in enumerate(separation_neighbors):
-                neighbor_path = neighbor_predictions.get(neighbor_id)
-                neighbor_position = (
-                    snapshot.robots[neighbor_id].position
-                    if neighbor_path is None else
-                    neighbor_path[min(step, len(neighbor_path) - 1)]
-                )
-                normal = stable_separation_normal(
-                    robot_id,
-                    neighbor_id,
-                    {
-                        robot_id: robot.position,
-                        neighbor_id: snapshot.robots[neighbor_id].position,
-                    },
-                    snapshot.target_epoch,
-                )
-                difference = path[step] - np.asarray(neighbor_position)
-                constraints.append(
-                    normal[0] * difference[0] + normal[1] * difference[1]
-                    + separation_slack[step - 1, neighbor_index]
-                    >= self.config.safety.preferred_separation_m
-                )
             for connected_index, neighbor_id in enumerate(connected_neighbors):
                 if neighbor_id == snapshot.station.station_id:
                     neighbor_position = np.asarray(snapshot.station.position)
@@ -434,8 +392,6 @@ class DistributedMpcController(SwarmController):
             snapshot, self.config.communication.maximum_range_m
         )
         self._last_selected_edges = edges
-        # Preferred separation is soft and repaired controller-independently.
-        closing_limits = {robot_id: () for robot_id in robot_ids}
         cycle_predictions = {
             robot_id: self._prediction_at_current(
                 self._previous_predictions.get(robot_id),
@@ -456,15 +412,14 @@ class DistributedMpcController(SwarmController):
             )
             try:
                 solved[robot_id], status = self._solve_agent(
-                    robot_id, snapshot, edges, visible, closing_limits
+                    robot_id, snapshot, edges, visible
                 )
             except RuntimeError as error:
                 if 'status is infeasible' not in str(error):
                     raise
                 # A changed Fiedler graph can make shifted prior trajectories
                 # mutually inconsistent. Retry the same local problem against
-                # current stationary neighbor references; collision budgets
-                # remain unchanged and authoritative.
+                # current stationary neighbor references.
                 stationary_neighbors = {
                     neighbor_id: tuple(
                         snapshot.robots[neighbor_id].position
@@ -477,7 +432,6 @@ class DistributedMpcController(SwarmController):
                     snapshot,
                     edges,
                     stationary_neighbors,
-                    closing_limits,
                 )
                 connectivity_retries += 1
             statuses.append(status)

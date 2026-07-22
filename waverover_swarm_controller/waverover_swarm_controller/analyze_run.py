@@ -69,12 +69,19 @@ def compute_analysis(data):
         graph = graph_metrics(sample, config) or {}
         separation, pair = separation_metrics(sample)
         predicted = sample.get('predicted_minimum_separation', {})
+        # A repaired endpoint can differ from the controller's optimized
+        # candidate.  Tracking performance is defined against the command the
+        # rover actually received, with legacy telemetry falling back to the
+        # pre-v8 setpoints field.
+        tracking_waypoints = sample.get(
+            'dispatched_waypoints', sample.get('active_waypoints', {})
+        ) or sample.get('setpoints', {})
         tracking_errors = [
             math.dist(
-                robot_value['position'], sample['setpoints'][robot_id]
+                robot_value['position'], tracking_waypoints[robot_id]
             )
             for robot_id, robot_value in sample.get('robots', {}).items()
-            if robot_id in sample.get('setpoints', {})
+            if tracking_waypoints.get(robot_id) is not None
         ]
         edges = tuple(tuple(edge) for edge in sample.get('selected_edges', []))
         if previous_edges is not None and edges != previous_edges:

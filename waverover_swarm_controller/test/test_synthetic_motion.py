@@ -2,23 +2,23 @@ from dataclasses import replace
 import math
 from pathlib import Path
 
-import pytest
-import yaml
 from builtin_interfaces.msg import Time
+import pytest
 
 from waverover_swarm_controller.config import ConfigError, load_experiment
 from waverover_swarm_controller.synthetic_mcs import (
-    SyntheticMCS,
     generate_formation,
+    SyntheticMCS,
     validate_formation,
 )
 from waverover_swarm_controller.synthetic_motion import (
-    SyntheticTrajectory,
     action_primitive,
-    integrate_motion,
-    yaw_quaternion,
     derive_rover_seed,
+    integrate_motion,
+    SyntheticTrajectory,
+    yaw_quaternion,
 )
+import yaml
 
 
 def config_path():

@@ -4,8 +4,8 @@ import time
 
 import numpy as np
 
-from ..models import ControllerResult
 from .heuristic import HeuristicController
+from ..models import ControllerResult
 
 
 class DecentralizedHeuristicController(HeuristicController):

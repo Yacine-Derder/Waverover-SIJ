@@ -203,13 +203,13 @@ def test_actual_convex_recovery_reports_nonnegative_explicit_slack(
     assert diagnostics['total_connectivity_slack_m'] >= (
         diagnostics['maximum_connectivity_slack_m']
     )
-    assert diagnostics['maximum_connectivity_slack_m'] > 0.0
+    assert diagnostics['maximum_connectivity_slack_m'] == pytest.approx(0.0)
     assert math.dist(
         result.setpoints['r1'], selected.station.position
     ) <= hard_limit + diagnostics['maximum_connectivity_slack_m'] + 1e-5
 
 
-def test_deterministic_multi_edge_recovery_is_order_independent_and_bounded(
+def test_static_connectivity_recovery_is_order_independent_and_not_step_limited(
     example_config, snapshot
 ):
     robots = {
@@ -232,9 +232,9 @@ def test_deterministic_multi_edge_recovery_is_order_independent_and_bounded(
     assert first == second
     assert set(first) == set(robots)
     assert all(all(math.isfinite(value) for value in point) for point in first.values())
-    assert all(
+    assert any(
         math.dist(first[key], robots[key].position)
-        <= example_config.controller.mpc_max_step_m + 1e-9
+        > example_config.controller.mpc_max_step_m + 1e-9
         for key in robots
     )
     assert math.dist(first['a'], selected.station.position) < 2.5
@@ -344,7 +344,6 @@ def test_distributed_no_selected_rover_edge_uses_closest_rover_objective(
     }
     controller._solve_agent(
         robot_id, snapshot, (), predictions,
-        {key: () for key in snapshot.robots},
     )
     diagnostics = controller._last_agent_diagnostics[robot_id]
 
@@ -378,32 +377,23 @@ def test_recovery_penalty_defaults_and_rejects_nonpositive(tmp_path):
         load_experiment(invalid, algorithm_override='convex')
 
 
-def test_normal_and_recovery_candidates_are_each_repaired_once(
-    monkeypatch, example_config, snapshot
+def test_normal_and_recovery_candidates_are_not_pre_dispatch_repaired(
+    example_config, snapshot
 ):
     config = replace(
         example_config,
         controller=replace(example_config.controller, algorithm='convex'),
     )
-    original = SwarmCoordinator._repair_result
-    calls = []
-
-    def counted(coordinator, selected_snapshot, result):
-        calls.append(result.optimization_mode)
-        return original(coordinator, selected_snapshot, result)
-
-    monkeypatch.setattr(SwarmCoordinator, '_repair_result', counted)
     controller = SimpleNamespace(
         compute=lambda selected: _result(selected, 'normal_convex'),
         compute_recovery=lambda selected: _result(selected, 'recovery_convex'),
     )
     coordinator = _coordinator(config, controller)
-    SwarmCoordinator._compute_valid_result(coordinator, snapshot)
-    assert calls == ['normal_convex']
+    outcome = SwarmCoordinator._compute_valid_result(coordinator, snapshot)
+    assert dict(outcome.result.collision_repair) == {}
 
-    calls.clear()
     controller.compute = lambda _selected: (_ for _ in ()).throw(
         RuntimeError('infeasible')
     )
-    SwarmCoordinator._compute_valid_result(coordinator, snapshot)
-    assert calls == ['recovery_convex']
+    outcome = SwarmCoordinator._compute_valid_result(coordinator, snapshot)
+    assert dict(outcome.result.collision_repair) == {}

@@ -48,6 +48,8 @@ def test_controller_telemetry_is_versioned_structured_and_canonical(
                 'last_publication_age_sec': 0.25,
                 'refresh_count': 7,
                 'active_waypoint_overdue': True,
+                'active_objective_revision': 4,
+                'pending_objective_revision': 5,
             }
             for robot_id in snapshot.robots
         },
@@ -56,7 +58,7 @@ def test_controller_telemetry_is_versioned_structured_and_canonical(
     assert payload['configured_algorithm'] == 'heuristic'
     assert payload['effective_algorithm'] == example_config.controller.algorithm
 
-    assert payload['schema_version'] == 7
+    assert payload['schema_version'] == 8
     assert payload['result_state'] == 'valid'
     assert payload['commands_enabled'] is False
     assert 'armed' not in payload
@@ -69,6 +71,14 @@ def test_controller_telemetry_is_versioned_structured_and_canonical(
     assert dispatch['last_publication_age_sec'] == 0.25
     assert dispatch['refresh_count'] == 7
     assert dispatch['active_waypoint_overdue']
+    assert dispatch['active_objective_revision'] == 4
+    assert dispatch['pending_objective_revision'] == 5
+    assert payload['optimized_setpoints']['robot_2'] == list(
+        setpoints['robot_2']
+    )
+    assert payload['dispatched_waypoints']['robot_2'] == list(
+        setpoints['robot_2']
+    )
     assert payload['predicted_minimum_separation']['step'] == 0
     assert payload['current_minimum_separation']['pair'] == [
         'robot_10', 'robot_2'

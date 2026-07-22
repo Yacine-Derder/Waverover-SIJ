@@ -255,11 +255,18 @@ class ReplayApp:
                     axis.plot([point[0] for point in path],
                               [point[1] for point in path], ':', color='purple')
         for key, marker, color in (
-            ('setpoints', 'o', 'green'),
-            ('active_waypoints', 'D', 'blue'),
+            ('optimized_setpoints', 'o', 'green'),
+            ('dispatched_waypoints', 'D', 'blue'),
             ('pending_waypoints', 'x', 'cyan'),
         ):
-            for robot_id, point in telemetry.get(key, {}).items():
+            fallback = (
+                'setpoints' if key == 'optimized_setpoints'
+                else 'active_waypoints' if key == 'dispatched_waypoints'
+                else key
+            )
+            for robot_id, point in telemetry.get(
+                key, telemetry.get(fallback, {})
+            ).items():
                 if point is not None:
                     axis.scatter([point[0]], [point[1]], marker=marker, color=color)
         for values in telemetry.get('waypoint_dispatch', {}).values():

@@ -22,9 +22,7 @@ def _minimum_pairwise_separation(points_by_id):
 
 
 def validate_controller_result(config, snapshot, result, now):
-    from .waypoint_repair import _simultaneous_segment_distance
-
-    collision_events = []
+    from .controllers.base import controller_schedule, ControllerSchedule
     if snapshot.frame_id != 'robotics_lab':
         raise SafetyViolation('Snapshot frame is not robotics_lab.')
     if now - result.created_at > config.safety.controller_result_timeout_sec:
@@ -49,52 +47,23 @@ def validate_controller_result(config, snapshot, result, now):
         if not config.safety.geofence.contains(point):
             raise SafetyViolation('Setpoint for %s violates geofence.' % robot_id)
 
-    current_distance, current_first, current_second = _minimum_pairwise_separation(
-        {
-            robot_id: snapshot.robots[robot_id].position
-            for robot_id in snapshot.robots
-        }
-    )
-    if current_distance < config.safety.minimum_separation_m:
-        collision_events.append({
-            'kind': 'current', 'pair': (current_first, current_second),
-            'distance_m': current_distance,
-        })
-    proposed_distance, proposed_first, proposed_second = (
-        _minimum_pairwise_separation(result.setpoints)
-    )
-    if proposed_distance < config.safety.minimum_separation_m:
-        collision_events.append({
-            'kind': 'proposed', 'pair': (proposed_first, proposed_second),
-            'distance_m': proposed_distance,
-        })
-    for first_id, second_id in combinations(sorted(snapshot.robots), 2):
-        segment_distance, fraction = _simultaneous_segment_distance(
-            snapshot.robots[first_id].position, result.setpoints[first_id],
-            snapshot.robots[second_id].position, result.setpoints[second_id],
-        )
-        if segment_distance < config.safety.minimum_separation_m:
-            collision_events.append({
-                'kind': 'predicted_first_segment',
-                'pair': (first_id, second_id),
-                'distance_m': segment_distance,
-                'segment_fraction': fraction,
-            })
-
     paths = result.predicted_paths
     if paths:
+        receding = controller_schedule(
+            config.controller.algorithm
+        ) is ControllerSchedule.RECEDING_HORIZON
         for robot_id in sorted(snapshot.robots):
             path = paths.get(robot_id)
             if path is None or not path:
                 raise SafetyViolation('Missing predicted path for %s.' % robot_id)
-            if math.dist(
+            if receding and math.dist(
                 path[0], snapshot.robots[robot_id].position
             ) > 1e-9:
                 raise SafetyViolation(
                     'Predicted path for %s does not start at its measured position.'
                     % robot_id
                 )
-            if len(path) >= 2 and math.dist(
+            if receding and len(path) >= 2 and math.dist(
                 path[1], result.setpoints[robot_id]
             ) > 1e-9:
                 raise SafetyViolation(
@@ -112,16 +81,8 @@ def validate_controller_result(config, snapshot, result, now):
                         'Predicted path for %s leaves geofence.' % robot_id
                     )
                 positions[robot_id] = point
-            separation, first_id, second_id = _minimum_pairwise_separation(
-                positions
-            )
-            if separation < config.safety.minimum_separation_m:
-                collision_events.append({
-                    'kind': 'predicted', 'pair': (first_id, second_id),
-                    'distance_m': separation, 'step': step,
-                })
     valid_nodes = expected | {snapshot.station.station_id}
     for edge in result.selected_edges:
         if edge[0] not in valid_nodes or edge[1] not in valid_nodes:
             raise SafetyViolation('Selected edge references an unknown node.')
-    return collision_events or True
+    return True

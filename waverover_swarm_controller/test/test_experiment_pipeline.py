@@ -1,10 +1,8 @@
 from datetime import datetime, timezone
-import json
 from pathlib import Path
 import re
 
 import pytest
-import yaml
 
 from waverover.stack_config import load_stack_config
 from waverover_swarm_controller.analysis_metrics import (
@@ -27,6 +25,7 @@ from waverover_swarm_controller.run_experiment import (
     parse_arguments,
     resolve_algorithm_selection,
 )
+import yaml
 
 
 def example_config():
@@ -86,9 +85,9 @@ def test_runner_uses_argument_lists_and_preserves_configured_dry_run():
         / 'waverover_swarm_controller' / 'run_experiment.py'
     ).read_text(encoding='utf-8')
     assert 'shell=True' not in source
-    assert "str(config.safety.dry_run).lower()" in source
+    assert 'str(config.safety.dry_run).lower()' in source
     assert "'waypoint_dispatch': asdict(config.waypoint_dispatch)" in source
-    assert "dry_run_override=True" not in source
+    assert 'dry_run_override=True' not in source
     assert "['dry_run'] = True" not in source
     assert '/waverover_swarm/arm' not in source
     assert "'BEGIN'" in source and "'END'" in source

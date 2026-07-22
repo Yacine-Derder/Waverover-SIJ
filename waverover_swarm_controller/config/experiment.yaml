@@ -40,7 +40,6 @@ controller:
     heuristic: {}
     heuristic_decentralized: {}
     convex:
-      mpc_max_step_m: 0.333333
       connectivity_recovery_slack_penalty: 10000.0
     mpc_centralized:
       mpc_horizon: 5

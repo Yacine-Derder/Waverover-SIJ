@@ -5,11 +5,11 @@ from geometry_msgs.msg import PoseStamped, TwistStamped
 from rclpy.serialization import serialize_message
 import rosbag2_py
 from std_msgs.msg import String
-import yaml
 
 from waverover_swarm_controller.analyze_run import analyze
 from waverover_swarm_controller.compare_runs import compare
 from waverover_swarm_controller.replay_run import replay
+import yaml
 
 
 def _string(value):

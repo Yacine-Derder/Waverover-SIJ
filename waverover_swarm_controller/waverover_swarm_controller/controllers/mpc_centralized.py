@@ -34,6 +34,7 @@ class CentralizedMpcController(ConvexController):
             created_at=result.created_at,
             target_epoch=snapshot.target_epoch,
             optimization_mode=result.optimization_mode,
+            controller_diagnostics=result.controller_diagnostics,
         )
 
     def compute_recovery(self, snapshot):
@@ -59,6 +60,7 @@ class CentralizedMpcController(ConvexController):
             created_at=result.created_at,
             target_epoch=result.target_epoch,
             optimization_mode='recovery_mpc',
+            controller_diagnostics=result.controller_diagnostics,
         )
 
     @property

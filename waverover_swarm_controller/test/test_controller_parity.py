@@ -4,6 +4,7 @@ import math
 import pytest
 
 from waverover_swarm_controller.controllers import controller_from_config
+from waverover_swarm_controller.controllers.base import repair_controller_result
 from waverover_swarm_controller.controllers.heuristic import HeuristicController
 from waverover_swarm_controller.controllers.heuristic_decentralized import (
     DecentralizedHeuristicController,
@@ -145,13 +146,15 @@ def test_heuristic_outputs_are_snapped_to_selected_connectivity_links(
     )
 
     controller = controller_from_config(config)
-    controller._controller.compute = lambda chosen: ControllerResult(
+    controller.compute = lambda chosen: ControllerResult(
         setpoints={'r1': (4.0, 0.0)},
         selected_edges=((chosen.station.station_id, 'r1'),),
         created_at=chosen.created_at,
         target_epoch=chosen.target_epoch,
     )
-    result = controller.compute(selected)
+    result = repair_controller_result(
+        config, selected, controller.compute(selected)
+    )
     report = result.collision_repair
     allowed = (
         config.communication.maximum_range_m - config.vehicle.turn_radius_m

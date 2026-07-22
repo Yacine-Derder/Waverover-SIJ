@@ -7,6 +7,7 @@ import numpy as np
 
 from .base import (
     ControllerUnavailableError,
+    optimization_hard_link_limit,
     optional_dependency,
     replace_first_future_points,
     SwarmController,
@@ -65,6 +66,11 @@ def project_connectivity_safe(snapshot, setpoints, edges, maximum_distance):
 class ConvexController(SwarmController):
     horizon_steps = 1
 
+    def __init__(self, config):
+        super().__init__(config)
+        self._last_selected_edges = ()
+        self._last_solver_status = 'not_run'
+
     def availability(self):
         available, reason = optional_dependency('cvxpy', self.__class__.__name__)
         if not available:
@@ -105,19 +111,20 @@ class ConvexController(SwarmController):
         import cvxpy as cp
         robot_ids = tuple(sorted(snapshot.robots))
         if snapshot.station is None:
-            return {}, {}, (), {}, 'missing_station'
+            return {}, {}, (), {}, 'missing_station', {}
         if not robot_ids:
-            return {}, {}, (), {}, 'no_robots'
+            return {}, {}, (), {}, 'no_robots', {}
         if not snapshot.targets:
             stationary = {
                 robot_id: snapshot.robots[robot_id].position
                 for robot_id in robot_ids
             }
             paths = {robot_id: (point,) for robot_id, point in stationary.items()}
-            return stationary, paths, (), {}, 'no_targets'
+            return stationary, paths, (), {}, 'no_targets', {}
 
         assignments = self._assign_targets(snapshot)
         edges = _tree_edges(snapshot)
+        self._last_selected_edges = edges
         count = len(robot_ids)
         index = {robot_id: value for value, robot_id in enumerate(robot_ids)}
         current = np.asarray([
@@ -141,21 +148,29 @@ class ConvexController(SwarmController):
         )
         constraints.extend(separation_constraints)
         objective += separation_penalty
-        maximum_link = self.config.communication.maximum_range_m - (
-            2.0 * self.config.vehicle.turn_radius_m
-        )
+        maximum_link = optimization_hard_link_limit(self.config)
         if recovery and edges:
             connectivity_slack = cp.Variable(
                 (horizon_steps, len(edges)), nonneg=True
             )
             # Connectivity slack dominates the nominal target/link objective.
-            objective += 1_000_000.0 * cp.sum(connectivity_slack)
+            objective += (
+                self.config.controller.connectivity_recovery_slack_penalty
+                * cp.sum(connectivity_slack)
+            )
         for step in range(1, horizon_steps + 1):
             for robot_id in robot_ids:
                 robot_index = index[robot_id]
                 constraints.append(cp.norm(
                     positions[step, robot_index] - positions[step - 1, robot_index]
                 ) <= self.config.controller.mpc_max_step_m)
+                fence = self.config.safety.geofence
+                constraints.extend((
+                    positions[step, robot_index, 0] >= fence.x_min,
+                    positions[step, robot_index, 0] <= fence.x_max,
+                    positions[step, robot_index, 1] >= fence.y_min,
+                    positions[step, robot_index, 1] <= fence.y_max,
+                ))
                 target = assignments[robot_id]
                 weight = max(target.weight, 1e-9)
                 objective += weight * cp.norm(
@@ -179,9 +194,11 @@ class ConvexController(SwarmController):
                 time_limit=self.config.safety.controller_result_timeout_sec,
             )
         except (cp.SolverError, AttributeError) as error:
+            self._last_solver_status = 'solver_exception'
             raise ControllerUnavailableError(
                 'Convex solve failed: %s' % error
             ) from error
+        self._last_solver_status = str(problem.status)
         if problem.status not in ('optimal', 'optimal_inaccurate') or positions.value is None:
             raise RuntimeError('Convex problem status is %s.' % problem.status)
         paths = {
@@ -196,29 +213,36 @@ class ConvexController(SwarmController):
         optimized_setpoints = {
             robot_id: paths[robot_id][1] for robot_id in robot_ids
         }
-        projected_setpoints = project_connectivity_safe(
-            snapshot,
-            optimized_setpoints,
-            edges,
-            self.config.communication.maximum_range_m
-            - self.config.vehicle.turn_radius_m,
-        )
-        # Preferred collision separation is deliberately soft. Every
-        # controller result passes through the shared deterministic repair.
-        setpoints = projected_setpoints
+        setpoints = optimized_setpoints
         paths = replace_first_future_points(paths, setpoints)
         target_assignments = {
             robot_id: target.target_id
             for robot_id, target in assignments.items()
         }
-        return setpoints, paths, edges, target_assignments, problem.status
+        slack_values = (
+            np.asarray(connectivity_slack.value, dtype=float)
+            if connectivity_slack is not None
+            and connectivity_slack.value is not None else np.zeros(0)
+        )
+        slack_values = np.maximum(slack_values, 0.0)
+        slack_diagnostics = {
+            'hard_link_limit_m': maximum_link,
+            'maximum_connectivity_slack_m': (
+                float(np.max(slack_values)) if slack_values.size else 0.0
+            ),
+            'total_connectivity_slack_m': float(np.sum(slack_values)),
+        }
+        return (
+            setpoints, paths, edges, target_assignments, problem.status,
+            slack_diagnostics,
+        )
 
     def compute(self, snapshot):
         started = time.monotonic()
         available, reason = self.availability()
         if not available:
             raise ControllerUnavailableError(reason)
-        setpoints, paths, edges, target_assignments, status = self._solve(
+        setpoints, paths, edges, target_assignments, status, diagnostics = self._solve(
             snapshot, self.horizon_steps, recovery=False
         )
         return ControllerResult(
@@ -236,11 +260,12 @@ class ConvexController(SwarmController):
                 if self.config.controller.algorithm == 'convex'
                 else 'normal_mpc'
             ),
+            controller_diagnostics=diagnostics,
         )
 
     def compute_recovery(self, snapshot):
         started = time.monotonic()
-        setpoints, paths, edges, assignments, status = self._solve(
+        setpoints, paths, edges, assignments, status, diagnostics = self._solve(
             snapshot, self.horizon_steps, recovery=True
         )
         return ControllerResult(
@@ -258,4 +283,5 @@ class ConvexController(SwarmController):
                 if self.config.controller.algorithm == 'convex'
                 else 'recovery_mpc'
             ),
+            controller_diagnostics=diagnostics,
         )

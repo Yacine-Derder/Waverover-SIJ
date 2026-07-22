@@ -61,7 +61,11 @@ def test_transient_pose_warning_clears_after_valid_cycle_but_fault_stays_latched
             self.latest_result = None
             self._snapshot = lambda: object()
             self._compute_valid_result = lambda _snapshot: SimpleNamespace(
-                setpoints={'134': (0.0, 0.0)}
+                result=SimpleNamespace(setpoints={'134': (0.0, 0.0)}),
+                dispatch_allowed=True,
+                complete_command_set_generated=True,
+                final_command_set_passed_validation=True,
+                controller_mode='normal_convex',
             )
             self._publish_visualization = lambda _snapshot, _result: None
             self._publish_controller_telemetry = lambda *_args: None
@@ -112,14 +116,15 @@ def test_convex_solver_failures_fall_back_without_faulting_dispatcher(
         get_logger=lambda: SimpleNamespace(warn=lambda _message: None),
     )
 
-    result = SwarmCoordinator._compute_valid_result(coordinator, snapshot)
+    outcome = SwarmCoordinator._compute_valid_result(coordinator, snapshot)
+    result = outcome.result
 
     assert result.optimization_mode == 'deterministic_recovery'
     assert result.setpoints == {
         key: state.position for key, state in snapshot.robots.items()
     }
     assert not dispatcher.faulted
-    assert coordinator._optimization_dispatch_allowed
+    assert outcome.dispatch_allowed
 
 
 def test_dispatch_suppresses_dry_run_and_live_mode_publishes_immediately(
@@ -336,9 +341,16 @@ def test_safety_rejected_optimization_never_reaches_dispatch_and_recovers(
 
     dispatcher = FakeDispatcher()
     counters = {'dispatch': 0, 'visualization': 0, 'diagnostics': 0}
+    config = replace(
+        example_config,
+        controller=replace(example_config.controller, algorithm='convex'),
+    )
     coordinator = SimpleNamespace(
-        config=example_config,
-        controller=SimpleNamespace(compute=lambda _snapshot: rejected),
+        config=config,
+        controller=SimpleNamespace(
+            compute=lambda _snapshot: rejected,
+            compute_recovery=lambda _snapshot: valid,
+        ),
         dispatcher=dispatcher,
         latest_result=None,
         latest_rejected_result=None,
@@ -369,7 +381,10 @@ def test_safety_rejected_optimization_never_reaches_dispatch_and_recovers(
     assert counters['visualization'] == 1
     assert coordinator.latest_stop_reason == ''
 
-    coordinator.controller = SimpleNamespace(compute=lambda _snapshot: valid)
+    coordinator.controller = SimpleNamespace(
+        compute=lambda _snapshot: valid,
+        compute_recovery=lambda _snapshot: valid,
+    )
     SwarmCoordinator._control_cycle(coordinator)
 
     assert coordinator.latest_stop_reason == ''

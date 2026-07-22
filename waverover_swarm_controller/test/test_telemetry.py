@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
-from waverover_swarm_controller.models import ControllerResult
+from waverover_swarm_controller.models import (
+    ControllerExecutionOutcome, ControllerResult,
+)
 from waverover_swarm_controller.telemetry import (
     build_controller_telemetry,
     canonical_json,
@@ -52,7 +54,7 @@ def test_controller_telemetry_is_versioned_structured_and_canonical(
         'none',
     )
 
-    assert payload['schema_version'] == 6
+    assert payload['schema_version'] == 7
     assert payload['result_state'] == 'valid'
     assert payload['commands_enabled'] is False
     assert 'armed' not in payload
@@ -74,3 +76,44 @@ def test_controller_telemetry_is_versioned_structured_and_canonical(
     encoded = canonical_json(payload)
     assert encoded.startswith('{"active_waypoints"')
     assert 'Infinity' not in encoded and 'NaN' not in encoded
+
+
+def test_execution_outcome_fields_are_serialized_compatibly(
+    example_config, snapshot
+):
+    result = ControllerResult(
+        setpoints={key: state.position for key, state in snapshot.robots.items()},
+        optimization_mode='recovery_convex',
+        solver_status='optimal',
+    )
+    outcome = ControllerExecutionOutcome(
+        result=result,
+        dispatch_allowed=True,
+        complete_command_set_generated=True,
+        final_command_set_passed_validation=True,
+        controller_mode='recovery_convex',
+        failure_metadata={
+            'normal_solver_status': 'infeasible',
+            'recovery_solver_status': 'optimal',
+            'normal_failure_reason': 'mock infeasible',
+            'maximum_connectivity_slack_m': 0.2,
+            'total_connectivity_slack_m': 0.3,
+        },
+        consecutive_recovery_cycles=2,
+        fallback_counters={'recovery_convex': 2},
+    )
+    payload = build_controller_telemetry(
+        example_config, snapshot, result, 'valid',
+        SimpleNamespace(sec=1, nanosec=2), False, '', {}, {}, {}, {}, 'none',
+        outcome,
+    )
+
+    assert payload['controller_mode'] == 'recovery_convex'
+    assert payload['optimization_mode'] == 'recovery_convex'
+    assert payload['normal_solver_status'] == 'infeasible'
+    assert payload['recovery_solver_status'] == 'optimal'
+    assert payload['maximum_connectivity_slack_m'] == 0.2
+    assert payload['total_connectivity_slack_m'] == 0.3
+    assert payload['consecutive_recovery_cycles'] == 2
+    assert payload['fallback_counters'] == {'recovery_convex': 2}
+    assert payload['dispatch_allowed']

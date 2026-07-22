@@ -8,6 +8,7 @@ import numpy as np
 from .base import (
     ControllerUnavailableError,
     minimum_lookahead,
+    optimization_hard_link_limit,
     optional_dependency,
     replace_first_future_points,
     SwarmController,
@@ -71,6 +72,8 @@ class DistributedMpcController(SwarmController):
         self._previous_predictions = {}
         self._last_agent_diagnostics = {}
         self._recovery_mode = False
+        self._last_selected_edges = ()
+        self._last_solver_status = 'not_run'
 
     def availability(self):
         return optional_dependency('cvxpy', self.__class__.__name__)
@@ -170,9 +173,32 @@ class DistributedMpcController(SwarmController):
         target_coefficients, connected_neighbors, burden, suppressed = (
             self._target_coefficients(robot_id, snapshot, edges)
         )
-        maximum_link = self.config.communication.maximum_range_m - (
-            2.0 * self.config.vehicle.turn_radius_m
+        selected_rover_neighbors = tuple(
+            key for key in connected_neighbors
+            if key != snapshot.station.station_id
         )
+        objective_neighbors = list(connected_neighbors)
+        closest_fallback = None
+        if not selected_rover_neighbors:
+            candidates = [
+                (
+                    math.dist(
+                        robot.position, snapshot.robots[key].position
+                    ),
+                    key,
+                )
+                for key in sorted(snapshot.robots) if key != robot_id
+            ]
+            candidates = [
+                candidate for candidate in candidates
+                if candidate[0] < self.config.communication.maximum_range_m
+            ]
+            if candidates:
+                closest_fallback = min(candidates)[1]
+                if closest_fallback not in objective_neighbors:
+                    objective_neighbors.append(closest_fallback)
+        objective_neighbors = tuple(sorted(objective_neighbors))
+        maximum_link = optimization_hard_link_limit(self.config)
         separation_neighbors = tuple(
             key for key in sorted(snapshot.robots) if key != robot_id
         )
@@ -185,12 +211,22 @@ class DistributedMpcController(SwarmController):
             (horizon, len(connected_neighbors)), nonneg=True
         ) if self._recovery_mode and connected_neighbors else None
         if connectivity_slack is not None:
-            objective += 1_000_000.0 * cp.sum(connectivity_slack)
+            objective += (
+                self.config.controller.connectivity_recovery_slack_penalty
+                * cp.sum(connectivity_slack)
+            )
         for step in range(1, horizon + 1):
             constraints.append(
                 cp.norm(path[step] - path[step - 1])
                 <= self.config.controller.mpc_max_step_m
             )
+            fence = self.config.safety.geofence
+            constraints.extend((
+                path[step, 0] >= fence.x_min,
+                path[step, 0] <= fence.x_max,
+                path[step, 1] >= fence.y_min,
+                path[step, 1] <= fence.y_max,
+            ))
             for target_id in sorted(snapshot.targets):
                 coefficient = target_coefficients[target_id]
                 if coefficient > 0.0:
@@ -244,6 +280,18 @@ class DistributedMpcController(SwarmController):
                 if connectivity_slack is not None:
                     limit += connectivity_slack[step - 1, connected_index]
                 constraints.append(cp.norm(path[step] - neighbor_position) <= limit)
+            for neighbor_id in objective_neighbors:
+                if neighbor_id == snapshot.station.station_id:
+                    neighbor_position = np.asarray(snapshot.station.position)
+                else:
+                    neighbor_path = neighbor_predictions.get(neighbor_id)
+                    neighbor_position = (
+                        np.asarray(snapshot.robots[neighbor_id].position)
+                        if neighbor_path is None else
+                        np.asarray(neighbor_path[
+                            min(step, len(neighbor_path) - 1)
+                        ])
+                    )
                 objective += (
                     self.config.controller.distributed_inter_agent_weight
                     * cp.maximum(
@@ -259,10 +307,25 @@ class DistributedMpcController(SwarmController):
                 time_limit=self.config.safety.controller_result_timeout_sec,
             )
         except (cp.SolverError, AttributeError) as error:
+            self._last_solver_status = 'solver_exception'
+            self._last_agent_diagnostics[robot_id] = {
+                'selected_neighbors': connected_neighbors,
+                'objective_neighbors': objective_neighbors,
+                'solver_status': 'solver_exception',
+                'solver_exception': {
+                    'type': type(error).__name__, 'message': str(error)
+                },
+            }
             raise ControllerUnavailableError(
                 'Distributed agent %s solve failed: %s' % (robot_id, error)
             ) from error
+        self._last_solver_status = str(problem.status)
         if problem.status not in ('optimal', 'optimal_inaccurate') or path.value is None:
+            self._last_agent_diagnostics[robot_id] = {
+                'selected_neighbors': connected_neighbors,
+                'objective_neighbors': objective_neighbors,
+                'solver_status': str(problem.status),
+            }
             raise RuntimeError(
                 'Distributed agent %s status is %s.' % (robot_id, problem.status)
             )
@@ -278,7 +341,7 @@ class DistributedMpcController(SwarmController):
         )
         neighbor_contribution = 0.0
         for step, point in enumerate(solved_path[1:], 1):
-            for neighbor_id in connected_neighbors:
+            for neighbor_id in objective_neighbors:
                 if neighbor_id == snapshot.station.station_id:
                     neighbor_position = snapshot.station.position
                 else:
@@ -306,12 +369,25 @@ class DistributedMpcController(SwarmController):
             'effective_target_coefficients': target_coefficients,
             'dominant_target_id': dominant,
             'selected_neighbors': connected_neighbors,
+            'objective_neighbors': objective_neighbors,
+            'closest_rover_objective_fallback': closest_fallback,
             'relay_burden': len(connected_neighbors),
             'target_normalization_factor': float(burden),
             'suppressed_targets': suppressed,
             'target_objective_contribution': float(target_contribution),
             'neighbor_objective_contribution': float(neighbor_contribution),
             'solver_status': problem.status,
+            'hard_link_limit_m': maximum_link,
+            'maximum_connectivity_slack_m': (
+                float(np.max(np.maximum(connectivity_slack.value, 0.0)))
+                if connectivity_slack is not None
+                and connectivity_slack.value is not None else 0.0
+            ),
+            'total_connectivity_slack_m': (
+                float(np.sum(np.maximum(connectivity_slack.value, 0.0)))
+                if connectivity_slack is not None
+                and connectivity_slack.value is not None else 0.0
+            ),
         }
         return solved_path, problem.status
 
@@ -357,6 +433,7 @@ class DistributedMpcController(SwarmController):
         edges = select_fiedler_edges(
             snapshot, self.config.communication.maximum_range_m
         )
+        self._last_selected_edges = edges
         # Preferred separation is soft and repaired controller-independently.
         closing_limits = {robot_id: () for robot_id in robot_ids}
         cycle_predictions = {
@@ -416,6 +493,14 @@ class DistributedMpcController(SwarmController):
         setpoints = lookahead_setpoints
         predicted_paths = replace_first_future_points(solved, setpoints)
         self._previous_predictions = predicted_paths
+        maximum_slack = max((
+            values['maximum_connectivity_slack_m']
+            for values in self._last_agent_diagnostics.values()
+        ), default=0.0)
+        total_slack = sum(
+            values['total_connectivity_slack_m']
+            for values in self._last_agent_diagnostics.values()
+        )
         return ControllerResult(
             setpoints=setpoints,
             target_assignments={
@@ -445,6 +530,9 @@ class DistributedMpcController(SwarmController):
                     self.config.controller.distributed_inter_agent_weight
                 ),
                 'agents': dict(sorted(self._last_agent_diagnostics.items())),
+                'hard_link_limit_m': optimization_hard_link_limit(self.config),
+                'maximum_connectivity_slack_m': maximum_slack,
+                'total_connectivity_slack_m': total_slack,
             },
             optimization_mode=(
                 'recovery_mpc' if self._recovery_mode else 'normal_mpc'

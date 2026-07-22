@@ -67,7 +67,7 @@ communication:
 safety:
   dry_run: false
   collision_policy: best_effort
-  preferred_separation_m: 0.5
+  preferred_separation_m: 0.4
   collision_repair_max_iterations: 50
   controller_result_timeout_sec: 2.5
   geofence:

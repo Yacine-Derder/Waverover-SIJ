@@ -54,7 +54,7 @@ communication:
   baud_rate: 921600
 
 bridge:
-  enable_imu_stream: true
+  enable_imu_stream: false
   imu_rate_hz: 50
   manual_lr_timeout_sec: 0.50
 
